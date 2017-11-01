@@ -19,52 +19,43 @@ import Network.TLS.Extra.Cipher as TLS
 import Data.Proxy
 import qualified Data.ByteString as ByteString
 import Data.Int
-import Data.ProtocolBuffers
-import Data.Serialize
-import Data.Text
 import Data.Word
-import GHC.Generics (Generic)
 import GHC.TypeLits
 
-data HelloRequest = HelloRequest {
-    helloRequestName :: Required 1 (Value Text)
-  } deriving(Generic, Show)
-instance Encode HelloRequest
-instance Decode HelloRequest
+import Data.Monoid ((<>))
+import Data.ByteString.Lazy (fromStrict, toStrict)
+import Data.Binary.Builder (toLazyByteString, fromByteString, singleton, putWord32be)
+import Data.Binary.Get (getByteString, getInt8, getWord32be, runGet)
+import Data.ProtoLens.Encoding (encodeMessage, decodeMessage)
+import Data.ProtoLens.Message (Message)
 
-data HelloReply = HelloReply {
-    helloReplyMessage :: Required 1 (Value Text)
-  } deriving(Generic, Show)
-instance Encode HelloReply
-instance Decode HelloReply
+import Proto.Helloworld
 
-sendMessage :: Encode a => Http2Client -> Http2Stream -> FlagSetter -> a -> IO ()
+sendMessage :: Message a => Http2Client -> Http2Stream -> FlagSetter -> a -> IO ()
 sendMessage conn stream flagmod msg = 
-    sendData conn stream flagmod (encodePlainMessage msg)
+    sendData conn stream flagmod (toStrict . toLazyByteString $ encodePlainMessage msg)
   where
-    encodePlainMessage msg = runPut $ do
-        let bin = runPut $ encodeMessage msg
-        put (0 :: Int8)
-        put (fromIntegral (ByteString.length bin) :: Word32)
-        putByteString bin
+    encodePlainMessage msg =
+        let bin = encodeMessage msg
+        in singleton 0 <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString bin
 
-decodeResult :: Decode a => ByteString.ByteString -> Either String a
-decodeResult bin = runGet go bin
+decodeResult :: Message a => ByteString.ByteString -> Either String a
+decodeResult bin = runGet go (fromStrict bin)
   where
     go = do
-        (0 :: Int8) <- get
-        (n :: Word32) <- get
+        0 <- getInt8
+        n <- getWord32be
         if ByteString.length bin < fromIntegral (1 + 4 + n)
         then
             fail "not enough data for decoding"
         else 
-            decodeMessage
+            decodeMessage <$> getByteString (fromIntegral n)
 
 type Reply a = ((FrameHeader, StreamId, Either ErrorCode HeaderList),
                 (FrameHeader, StreamId, Either ErrorCode HeaderList),
                 (FrameHeader, Either ErrorCode (Either String a)))
 
-waitReply :: Decode a => Http2Stream -> IO (Reply a)
+waitReply :: Message a => Http2Stream -> IO (Reply a)
 waitReply stream = do
     h0 <- _waitHeaders stream
     msg <- fmap f (_waitData stream)
@@ -73,7 +64,7 @@ waitReply stream = do
   where
     f (hdrs, dat) = (hdrs, fmap decodeResult dat)
 
-class (Encode a, Decode b) => RPC a b where
+class (Message a, Message b) => RPC a b where
     path :: Proxy (a,b) -> ByteString.ByteString
   
 instance RPC HelloRequest HelloReply where
@@ -110,7 +101,7 @@ someFunc = do
     let ofc = _outgoingFlowControl conn
     _addCredit ifc 1000000
     _ <- _updateWindow ifc
-    print =<< (call conn (HelloRequest (putField "world"))  :: IO (Either TooMuchConcurrency (Reply HelloReply)))
+    print =<< (call conn (HelloRequest "world")  :: IO (Either TooMuchConcurrency (Reply HelloReply)))
     putStrLn "done"
 
 

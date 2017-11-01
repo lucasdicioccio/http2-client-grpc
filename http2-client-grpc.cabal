@@ -17,9 +17,10 @@ custom-setup
   setup-depends: base, Cabal, proto-lens-protoc
 
 library
-  hs-source-dirs:      src
-  exposed-modules:     Lib
+  hs-source-dirs:      src, gen
+  exposed-modules:     Lib, Network.GRPC
   other-modules:       Proto.Helloworld
+                     , GRPC.Helloworld
   build-depends:       base >= 4.7 && < 5
                      , binary
                      , bytestring
@@ -30,6 +31,24 @@ library
                      , proto-lens-protoc
                      , text
                      , tls
+  default-language:    Haskell2010
+
+executable http2-client-grpc-gen
+  hs-source-dirs:      app
+  main-is:             MakeRPC.hs
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  build-depends:       base
+                     , bytestring
+                     , containers
+                     , haskell-src-exts
+                     , proto-lens
+                     , proto-lens-descriptors
+                     , proto-lens-protoc
+                     , Cabal
+                     , lens-family
+                     , lens-labels
+                     , process
+                     , text
   default-language:    Haskell2010
 
 executable http2-client-grpc-exe

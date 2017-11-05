@@ -37,11 +37,29 @@ resolver: lts-9.1
 # will not be run. This is useful for tweaking upstream packages.
 packages:
 - .
+- location:
+    git: https://github.com/lucasdicioccio/proto-lens.git
+    commit: 4fde0fae1658010c7909505f349df6aed3e5e7e3
+  subdirs:
+  - proto-lens-protobuf-types
+  - proto-lens
+  - proto-lens-protoc
+  - lens-labels
+  - proto-lens-combinators
+  extra-dep: true
+- location:
+    git: https://github.com/lucasdicioccio/http2-client.git
+    commit: 45271788d9164ddbed2ed47489a589d14421c697
+  extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)
 extra-deps:
-- http2-client-0.3.0.0
-- protobuf-0.2.1.1
+- http2-client-0.4.0.1
+- proto-lens-protobuf-types-0.3.0.0
+- proto-lens-0.3.0.0
+- proto-lens-protoc-0.3.0.0
+- lens-labels-0.2.0.0
+- proto-lens-combinators-0.1.0.9
 
 # Override default flag values for local packages and extra-deps
 flags: {}

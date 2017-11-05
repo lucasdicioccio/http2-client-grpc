@@ -15,7 +15,9 @@ import Lens.Family2
 import Proto.Google.Protobuf.Compiler.Plugin
     ( CodeGeneratorRequest
     , CodeGeneratorResponse
-    , file
+    )
+import Proto.Google.Protobuf.Compiler.Plugin'Fields
+    ( file
     , name
     , content
     , fileToGenerate
@@ -29,7 +31,9 @@ import Proto.Google.Protobuf.Descriptor
     ( FileDescriptorProto
     , ServiceDescriptorProto
     , MethodDescriptorProto
-    , dependency
+    )
+import Proto.Google.Protobuf.Descriptor'Fields
+    ( dependency
     , service
     , method
     , package
@@ -40,8 +44,7 @@ import System.Environment (getProgName)
 import System.Exit (exitWith, ExitCode(..))
 import System.IO as IO
 
--- import Data.ProtoLens.Compiler.Combinators (prettyPrint, getModuleName)
-import Data.ProtoLens.Compiler.Combinators (prettyPrint)
+import Data.ProtoLens.Compiler.Combinators (prettyPrint, getModuleName)
 import Data.ProtoLens.Compiler.Generate
 import Data.ProtoLens.Compiler.Plugin
 
@@ -129,7 +132,7 @@ makeModule pf externimports =
 
     rpcHaskellName :: ServiceDescriptorProto -> MethodDescriptorProto -> Syntax.Name ()
     rpcHaskellName service method =
-        Syntax.Ident () $ T.unpack $ mconcat [ service ^. name
+        Syntax.Ident () $ T.unpack $ mconcat [ T.toTitle $ service ^. name
                                              , "_"
                                              , method ^. name
                                              ]
@@ -180,8 +183,3 @@ makeModule pf externimports =
                                 (Syntax.Lit () $ Syntax.String () path path))
                             Nothing
           ]
-
-getModuleName :: Syntax.Module () -> Maybe (Syntax.ModuleName ())
-getModuleName (Syntax.Module _ (Just (Syntax.ModuleHead _ name _ _)) _ _ _)
-    = Just name
-getModuleName _ = Nothing

@@ -22,8 +22,8 @@ class (Message (Input n), Message (Output n)) => RPC n where
   type Output n
   path :: n -> ByteString.ByteString
   
-sendMessage :: Message a => Http2Client -> Http2Stream -> FlagSetter -> a -> IO ()
-sendMessage conn stream flagmod msg = 
+sendMessage :: (Show a, Message a) => Http2Client -> Http2Stream -> FlagSetter -> a -> IO ()
+sendMessage conn stream flagmod msg = do
     sendData conn stream flagmod (toStrict . toLazyByteString $ encodePlainMessage msg)
   where
     encodePlainMessage msg =
@@ -49,27 +49,30 @@ type Reply a = ((FrameHeader, StreamId, Either ErrorCode HeaderList),
 waitReply :: Message a => Http2Stream -> IO (Reply a)
 waitReply stream = do
     h0 <- _waitHeaders stream
-    msg <- fmap f (_waitData stream)
+    msg <- f <$> _waitData stream
     h1 <- _waitHeaders stream
     return (h0, h1, msg)
   where
     f (hdrs, dat) = (hdrs, fmap decodeResult dat)
 
-call :: (RPC rpc)
-     => rpc
-     -> Http2Client
+type Authority = ByteString.ByteString
+
+call :: (Show (Input rpc), RPC rpc)
+     => Http2Client
+     -> Authority
+     -> HeaderList
+     -> rpc
      -> Input rpc
      -> IO (Either TooMuchConcurrency (Reply (Output rpc)))
-call rpc conn req = do
+call conn authority extraheaders rpc req = do
     let request = [ (":method", "POST")
                   , (":scheme", "http")
-                  , (":authority", "localhost")
+                  , (":authority", authority)
                   , (":path", path rpc)
                   , ("grpc-timeout", "1S")
                   , ("content-type", "application/grpc+proto")
-                  , ("grpc-encoding", "gzip")
                   , ("te", "trailers")
-                  ]
+                  ] <> extraheaders
     withHttp2Stream conn $ \stream ->
         let
             initStream = headers stream request (setEndHeader)

@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Network.GRPC where
+module Network.GRPC (RPC(..), call, Reply, Authority) where
 
 import Data.Monoid ((<>))
 import Data.ByteString.Lazy (fromStrict, toStrict)
@@ -42,6 +42,16 @@ decodeResult bin = runGet go (fromStrict bin)
         else 
             decodeMessage <$> getByteString (fromIntegral n)
 
+-- | A reply.
+--
+-- This reply object contains a lot of information because a single gRPC call
+-- returns a lot of data. A future version of the library will have a proper
+-- data structure with properly named-fields on the reply object.
+--
+-- For now, remember:
+-- - 1st item: initial HTTP2 response
+-- - 2nd item: second (trailers) HTTP2 response
+-- - 3rd item: proper gRPC answer
 type Reply a = ((FrameHeader, StreamId, Either ErrorCode HeaderList),
                 (FrameHeader, StreamId, Either ErrorCode HeaderList),
                 (FrameHeader, Either ErrorCode (Either String a)))
@@ -55,14 +65,21 @@ waitReply stream = do
   where
     f (hdrs, dat) = (hdrs, fmap decodeResult dat)
 
+-- | The HTTP2-Authority portion of an URL (e.g., "dicioccio.fr:7777").
 type Authority = ByteString.ByteString
 
+-- | Call and wait (possibly forever for now) for a reply.
 call :: (Show (Input rpc), RPC rpc)
      => Http2Client
+     -- ^ A connected HTTP2 client.
      -> Authority
+     -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
      -> HeaderList
+     -- ^ A set of HTTP2 headers (e.g., for adding authentication headers).
      -> rpc
+     -- ^ The RPC you want to call (for instance, Greeter_SayHello).
      -> Input rpc
+     -- ^ The RPC input message.
      -> IO (Either TooMuchConcurrency (Reply (Output rpc)))
 call conn authority extraheaders rpc req = do
     let request = [ (":method", "POST")

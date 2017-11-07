@@ -39,6 +39,8 @@ import Proto.Google.Protobuf.Descriptor'Fields
     , package
     , inputType
     , outputType
+    , clientStreaming
+    , serverStreaming
     )
 import System.Environment (getProgName)
 import System.Exit (exitWith, ExitCode(..))
@@ -122,7 +124,7 @@ makeModule pf externimports =
     rpcDecl :: ServiceDescriptorProto -> MethodDescriptorProto -> [Syntax.Decl ()]
     rpcDecl service method = [ rpcDataDecl service method
                              , rpcInstanceDecl service method
-                             ]
+                             ] ++ rpcStreamingDecls service method
     rpcDataDecl :: ServiceDescriptorProto -> MethodDescriptorProto -> Syntax.Decl ()
     rpcDataDecl service method =
         Syntax.DataDecl () (Syntax.DataType ()) Nothing (Syntax.DHead () dataname) [single] Nothing
@@ -183,3 +185,22 @@ makeModule pf externimports =
                                 (Syntax.Lit () $ Syntax.String () path path))
                             Nothing
           ]
+    rpcStreamingDecls :: ServiceDescriptorProto -> MethodDescriptorProto -> [Syntax.Decl ()]
+    rpcStreamingDecls service method =
+        let clientStream = rpcStreamingDecl "ClientStream" service method
+            serverStream = rpcStreamingDecl "ServerStream" service method
+        in case (method ^. clientStreaming, method ^. serverStreaming) of
+          (True, True) -> [ clientStream , serverStream ]
+          (True, _)    -> [ clientStream ]
+          (_, True)    -> [ serverStream ]
+          _            -> [ ]
+
+    rpcStreamingDecl :: String -> ServiceDescriptorProto -> MethodDescriptorProto -> Syntax.Decl ()
+    rpcStreamingDecl typeclass service method =
+        Syntax.InstDecl () Nothing
+            (Syntax.IRule () Nothing Nothing
+                (Syntax.IHApp ()
+                    (Syntax.IHCon ()
+                        (Syntax.UnQual () $ Syntax.Ident () typeclass))
+                        (Syntax.TyCon () (Syntax.UnQual () $ rpcHaskellName service method))))
+            Nothing

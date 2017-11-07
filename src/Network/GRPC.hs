@@ -21,6 +21,10 @@ class (Message (Input n), Message (Output n)) => RPC n where
   type Input n
   type Output n
   path :: n -> ByteString.ByteString
+
+class ClientStream n where
+
+class ServerStream n where
   
 sendMessage :: (Show a, Message a) => Http2Client -> Http2Stream -> FlagSetter -> a -> IO ()
 sendMessage conn stream flagmod msg = do

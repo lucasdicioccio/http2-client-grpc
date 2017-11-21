@@ -1,9 +1,14 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Network.GRPC (RPC(..), call, Reply, Authority) where
 
+import Control.Exception (Exception(..), throwIO)
+import Control.Monad (forever)
 import Data.Monoid ((<>))
 import Data.ByteString.Lazy (fromStrict, toStrict)
 import Data.Binary.Builder (toLazyByteString, fromByteString, singleton, putWord32be)
@@ -56,18 +61,25 @@ decodeResult bin = runGet go (fromStrict bin)
 -- - 1st item: initial HTTP2 response
 -- - 2nd item: second (trailers) HTTP2 response
 -- - 3rd item: proper gRPC answer
-type Reply a = ((FrameHeader, StreamId, Either ErrorCode HeaderList),
-                (FrameHeader, StreamId, Either ErrorCode HeaderList),
-                (FrameHeader, Either ErrorCode (Either String a)))
+type Reply a = Either ErrorCode (HeaderList, Maybe HeaderList, (Either String a))
 
-waitReply :: Message a => Http2Stream -> IO (Reply a)
-waitReply stream = do
-    h0 <- _waitHeaders stream
-    msg <- f <$> _waitData stream
-    h1 <- _waitHeaders stream
-    return (h0, h1, msg)
+data UnallowedPushPromiseReceived = UnallowedPushPromiseReceived deriving Show
+instance Exception UnallowedPushPromiseReceived where
+
+throwOnPushPromise :: PushPromiseHandler
+throwOnPushPromise _ _ _ _ _ = throwIO UnallowedPushPromiseReceived
+
+waitReply :: Message a => Http2Stream -> IncomingFlowControl -> IO (Reply a)
+waitReply stream flowControl = do
+    f . fromStreamResult <$> waitStream stream flowControl throwOnPushPromise
   where
-    f (hdrs, dat) = (hdrs, fmap decodeResult dat)
+    f :: Message a => Either ErrorCode StreamResponse -> Reply a
+    f rsp = do
+       (hdrs, dat, trls) <- rsp
+       return (hdrs, trls, decodeResult dat)
+
+data InvalidState = InvalidState String deriving Show
+instance Exception InvalidState where
 
 -- | The HTTP2-Authority portion of an URL (e.g., "dicioccio.fr:7777").
 type Authority = ByteString.ByteString
@@ -99,5 +111,122 @@ call conn authority extraheaders rpc req = do
             initStream = headers stream request (setEndHeader)
             handler isfc osfc = do
                 sendMessage conn stream setEndStream req
-                waitReply stream 
+                waitReply stream isfc                
+
         in StreamDefinition initStream handler
+
+newtype RPCCall rpc a = RPCCall {
+    runRPC :: rpc 
+           -> Http2Client
+           -> IncomingFlowControl
+           -> OutgoingFlowControl
+           -> Http2Stream
+           -> IncomingFlowControl
+           -> OutgoingFlowControl
+           -> IO a
+  }
+
+-- | Call and wait (possibly forever for now) for a reply.
+open :: RPC rpc
+     => Http2Client
+     -- ^ A connected HTTP2 client.
+     -> IncomingFlowControl
+     -- ^ The connection incoming flow control.
+     -> OutgoingFlowControl
+     -- ^ The connection outgoing flow control.
+     -> Authority
+     -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
+     -> HeaderList
+     -- ^ A set of HTTP2 headers (e.g., for adding authentication headers).
+     -> rpc
+     -- ^ The RPC to call.
+     -> RPCCall rpc a
+     -- ^ The actual RPC handler.
+     -> IO (Either TooMuchConcurrency a)
+open conn icfc ocfc authority extraheaders rpc doStuff = do
+    let request = [ (":method", "POST")
+                  , (":scheme", "http")
+                  , (":authority", authority)
+                  , (":path", path rpc)
+                  , ("grpc-timeout", "1S")
+                  , ("content-type", "application/grpc+proto")
+                  , ("te", "trailers")
+                  ] <> extraheaders
+    withHttp2Stream conn $ \stream ->
+        let
+            initStream = headers stream request (setEndHeader)
+            handler isfc osfc = do
+                (runRPC doStuff) rpc conn icfc ocfc stream isfc osfc
+        in StreamDefinition initStream handler
+
+streamReply :: (Message (Output n), ServerStream n)
+            => (HeaderList -> Either String (Output n) -> IO ())
+            -> RPCCall n (HeaderList, HeaderList)
+streamReply handler = RPCCall $ \_ _ _ _ stream flowControl _ -> do
+    let {
+        loop hdrs = _waitEvent stream >>= \case
+            (StreamPushPromiseEvent _ _ _) ->
+                throwIO (InvalidState "push promise")
+            (StreamHeadersEvent _ trls) ->
+                return (hdrs, trls)
+            (StreamErrorEvent _ _) ->
+                throwIO (InvalidState "stream error")
+            (StreamDataEvent _ dat) -> do
+                _addCredit flowControl (ByteString.length dat)
+                _consumeCredit flowControl (ByteString.length dat)
+                _updateWindow flowControl
+                handler hdrs (decodeResult dat)
+                loop hdrs
+    } in
+        _waitEvent stream >>= \case
+            StreamHeadersEvent _ hdrs ->
+                loop hdrs
+            _                         ->
+                throwIO (InvalidState "no headers")
+
+data StreamDone = StreamDone
+
+streamRequest :: (Message (Input n), ClientStream n)
+              => (IO (Either StreamDone (Input n)))
+              -> RPCCall n ()
+streamRequest handler = RPCCall $ \x conn y connectionFlowControl stream z streamFlowControl -> do
+    forever $ do
+        next <- handler
+        case next of
+            Right msg ->
+                sendSingleMessage msg id conn connectionFlowControl stream streamFlowControl
+            Left _ ->
+                sendData conn stream setEndStream ""
+
+sendSingleMessage :: Message a
+                  => a
+                  -> FlagSetter
+                  -> Http2Client
+                  -> OutgoingFlowControl
+                  -> Http2Stream
+                  -> OutgoingFlowControl
+                  -> IO ()
+sendSingleMessage msg flagMod conn connectionFlowControl stream streamFlowControl = do
+    let upload dat = do
+            let !wanted = ByteString.length dat
+            gotStream <- _withdrawCredit streamFlowControl wanted
+            got       <- _withdrawCredit connectionFlowControl gotStream
+            _receiveCredit streamFlowControl (gotStream - got)
+            if got == wanted
+            then
+                sendData conn stream flagMod dat
+            else do
+                sendData conn stream id (ByteString.take got dat)
+                upload (ByteString.drop got dat)
+    upload . toStrict . toLazyByteString . encodePlainMessage $ msg
+  where
+    encodePlainMessage msg =
+        let bin = encodeMessage msg
+        in singleton 0 <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString bin
+
+singleRequest :: (Message (Input n), Message (Output n))
+              => Input n
+              -> RPCCall n (Reply (Output n))
+singleRequest msg = RPCCall $ \_ conn icfc ocfc stream isfc osfc -> do
+    sendSingleMessage msg setEndStream conn ocfc stream osfc
+    waitReply stream isfc

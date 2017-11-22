@@ -5,7 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Network.GRPC (RPC(..), call, Reply, Authority) where
+module Network.GRPC (RPC(..), ClientStream, ServerStream, call, Reply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..)) where
 
 import Control.Exception (Exception(..), throwIO)
 import Control.Monad (forever)
@@ -35,8 +35,8 @@ sendMessage :: (Show a, Message a) => Http2Client -> Http2Stream -> FlagSetter -
 sendMessage conn stream flagmod msg = do
     sendData conn stream flagmod (toStrict . toLazyByteString $ encodePlainMessage msg)
   where
-    encodePlainMessage msg =
-        let bin = encodeMessage msg
+    encodePlainMessage plain =
+        let bin = encodeMessage plain
         in singleton 0 <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString bin
 
 decodeResult :: Message a => ByteString.ByteString -> Either String a
@@ -109,7 +109,7 @@ call conn authority extraheaders rpc req = do
     withHttp2Stream conn $ \stream ->
         let
             initStream = headers stream request (setEndHeader)
-            handler isfc osfc = do
+            handler isfc _ = do
                 sendMessage conn stream setEndStream req
                 waitReply stream isfc                
 
@@ -173,8 +173,8 @@ streamReply handler = RPCCall $ \_ _ _ _ stream flowControl _ -> do
                 throwIO (InvalidState "stream error")
             (StreamDataEvent _ dat) -> do
                 _addCredit flowControl (ByteString.length dat)
-                _consumeCredit flowControl (ByteString.length dat)
-                _updateWindow flowControl
+                _ <- _consumeCredit flowControl (ByteString.length dat)
+                _ <- _updateWindow flowControl
                 handler hdrs (decodeResult dat)
                 loop hdrs
     } in
@@ -189,10 +189,10 @@ data StreamDone = StreamDone
 streamRequest :: (Message (Input n), ClientStream n)
               => (IO (Either StreamDone (Input n)))
               -> RPCCall n ()
-streamRequest handler = RPCCall $ \x conn y connectionFlowControl stream z streamFlowControl -> do
+streamRequest handler = RPCCall $ \_ conn _ connectionFlowControl stream _ streamFlowControl -> do
     forever $ do
-        next <- handler
-        case next of
+        nextEvent <- handler
+        case nextEvent of
             Right msg ->
                 sendSingleMessage msg id conn connectionFlowControl stream streamFlowControl
             Left _ ->
@@ -207,7 +207,7 @@ sendSingleMessage :: Message a
                   -> OutgoingFlowControl
                   -> IO ()
 sendSingleMessage msg flagMod conn connectionFlowControl stream streamFlowControl = do
-    let upload dat = do
+    let goUpload dat = do
             let !wanted = ByteString.length dat
             gotStream <- _withdrawCredit streamFlowControl wanted
             got       <- _withdrawCredit connectionFlowControl gotStream
@@ -217,16 +217,16 @@ sendSingleMessage msg flagMod conn connectionFlowControl stream streamFlowContro
                 sendData conn stream flagMod dat
             else do
                 sendData conn stream id (ByteString.take got dat)
-                upload (ByteString.drop got dat)
-    upload . toStrict . toLazyByteString . encodePlainMessage $ msg
+                goUpload (ByteString.drop got dat)
+    goUpload . toStrict . toLazyByteString . encodePlainMessage $ msg
   where
-    encodePlainMessage msg =
-        let bin = encodeMessage msg
+    encodePlainMessage plain =
+        let bin = encodeMessage plain
         in singleton 0 <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString bin
 
 singleRequest :: (Message (Input n), Message (Output n))
               => Input n
               -> RPCCall n (Reply (Output n))
-singleRequest msg = RPCCall $ \_ conn icfc ocfc stream isfc osfc -> do
+singleRequest msg = RPCCall $ \_ conn _ ocfc stream isfc osfc -> do
     sendSingleMessage msg setEndStream conn ocfc stream osfc
     waitReply stream isfc

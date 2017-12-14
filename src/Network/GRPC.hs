@@ -168,10 +168,11 @@ open conn icfc ocfc authority extraheaders timeout rpc doStuff = do
                 (runRPC doStuff) rpc conn icfc ocfc stream isfc osfc
         in StreamDefinition initStream handler
 
-streamReply :: (Message (Output n), ServerStream n)
-            => (HeaderList -> Either String (Output n) -> IO ())
+streamReply :: (Show (Input n), Message (Input n), Message (Output n), ServerStream n)
+            => Input n
+            -> (HeaderList -> Either String (Output n) -> IO ())
             -> RPCCall n (HeaderList, HeaderList)
-streamReply handler = RPCCall $ \_ _ _ _ stream flowControl _ -> do
+streamReply req handler = RPCCall $ \_ conn _ _ stream flowControl _ -> do
     let {
         loop hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
@@ -186,7 +187,8 @@ streamReply handler = RPCCall $ \_ _ _ _ stream flowControl _ -> do
                 _ <- _updateWindow flowControl
                 handler hdrs (decodeResult dat)
                 loop hdrs
-    } in
+    } in do
+        sendMessage conn stream setEndStream req
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
                 loop hdrs

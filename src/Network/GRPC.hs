@@ -5,7 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Network.GRPC (RPC(..), ClientStream, ServerStream, call, Reply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..)) where
+module Network.GRPC (RPC(..), ClientStream, ServerStream, call, Timeout(..), Reply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..)) where
 
 import Control.Exception (Exception(..), throwIO)
 import Control.Monad (forever)
@@ -13,7 +13,7 @@ import Data.Monoid ((<>))
 import Data.ByteString.Lazy (fromStrict, toStrict)
 import Data.Binary.Builder (toLazyByteString, fromByteString, singleton, putWord32be)
 import Data.Binary.Get (getByteString, getInt8, getWord32be, runGet)
-import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Char8 as ByteString
 import Data.ProtoLens.Encoding (encodeMessage, decodeMessage)
 import Data.ProtoLens.Message (Message)
 
@@ -92,17 +92,19 @@ call :: (Show (Input rpc), RPC rpc)
      -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
      -> HeaderList
      -- ^ A set of HTTP2 headers (e.g., for adding authentication headers).
+     -> Timeout
+     -- ^ Timeout in seconds.
      -> rpc
      -- ^ The RPC you want to call (for instance, Greeter_SayHello).
      -> Input rpc
      -- ^ The RPC input message.
      -> IO (Either TooMuchConcurrency (Reply (Output rpc)))
-call conn authority extraheaders rpc req = do
+call conn authority extraheaders timeout rpc req = do
     let request = [ (":method", "POST")
                   , (":scheme", "http")
                   , (":authority", authority)
                   , (":path", path rpc)
-                  , ("grpc-timeout", "1S")
+                  , ("grpc-timeout", showTimeout timeout)
                   , ("content-type", "application/grpc+proto")
                   , ("te", "trailers")
                   ] <> extraheaders
@@ -126,6 +128,11 @@ newtype RPCCall rpc a = RPCCall {
            -> IO a
   }
 
+data Timeout = Timeout Int
+
+showTimeout :: Timeout -> ByteString.ByteString
+showTimeout (Timeout n) = ByteString.pack $ show n ++ "S"
+
 -- | Call and wait (possibly forever for now) for a reply.
 open :: RPC rpc
      => Http2Client
@@ -138,17 +145,19 @@ open :: RPC rpc
      -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
      -> HeaderList
      -- ^ A set of HTTP2 headers (e.g., for adding authentication headers).
+     -> Timeout
+     -- ^ Timeout in seconds.
      -> rpc
      -- ^ The RPC to call.
      -> RPCCall rpc a
      -- ^ The actual RPC handler.
      -> IO (Either TooMuchConcurrency a)
-open conn icfc ocfc authority extraheaders rpc doStuff = do
+open conn icfc ocfc authority extraheaders timeout rpc doStuff = do
     let request = [ (":method", "POST")
                   , (":scheme", "http")
                   , (":authority", authority)
                   , (":path", path rpc)
-                  , ("grpc-timeout", "1S")
+                  , ("grpc-timeout", showTimeout timeout)
                   , ("content-type", "application/grpc+proto")
                   , ("te", "trailers")
                   ] <> extraheaders

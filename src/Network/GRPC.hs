@@ -31,14 +31,6 @@ class ClientStream n where
 
 class ServerStream n where
   
-sendMessage :: (Show a, Message a) => Http2Client -> Http2Stream -> FlagSetter -> a -> IO ()
-sendMessage conn stream flagmod msg = do
-    sendData conn stream flagmod (toStrict . toLazyByteString $ encodePlainMessage msg)
-  where
-    encodePlainMessage plain =
-        let bin = encodeMessage plain
-        in singleton 0 <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString bin
-
 decodeResult :: Message a => ByteString.ByteString -> Either String a
 decodeResult bin = runGet go (fromStrict bin)
   where
@@ -88,6 +80,8 @@ type Authority = ByteString.ByteString
 call :: (Show (Input rpc), RPC rpc)
      => Http2Client
      -- ^ A connected HTTP2 client.
+     -> OutgoingFlowControl
+     -- ^ The connection outgoing flow control.
      -> Authority
      -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
      -> HeaderList
@@ -99,7 +93,7 @@ call :: (Show (Input rpc), RPC rpc)
      -> Input rpc
      -- ^ The RPC input message.
      -> IO (Either TooMuchConcurrency (Reply (Output rpc)))
-call conn authority extraheaders timeout rpc req = do
+call conn ocfc authority extraheaders timeout rpc req = do
     let request = [ (":method", "POST")
                   , (":scheme", "http")
                   , (":authority", authority)
@@ -111,8 +105,8 @@ call conn authority extraheaders timeout rpc req = do
     withHttp2Stream conn $ \stream ->
         let
             initStream = headers stream request (setEndHeader)
-            handler isfc _ = do
-                sendMessage conn stream setEndStream req
+            handler isfc osfc = do
+                sendSingleMessage req setEndStream conn ocfc stream osfc 
                 waitReply stream isfc                
 
         in StreamDefinition initStream handler
@@ -172,7 +166,7 @@ streamReply :: (Show (Input n), Message (Input n), Message (Output n), ServerStr
             => Input n
             -> (HeaderList -> Either String (Output n) -> IO ())
             -> RPCCall n (HeaderList, HeaderList)
-streamReply req handler = RPCCall $ \_ conn _ _ stream flowControl _ -> do
+streamReply req handler = RPCCall $ \_ conn _ cofc stream flowControl sofc -> do
     let {
         loop hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
@@ -188,7 +182,7 @@ streamReply req handler = RPCCall $ \_ conn _ _ stream flowControl _ -> do
                 handler hdrs (decodeResult dat)
                 loop hdrs
     } in do
-        sendMessage conn stream setEndStream req
+        sendSingleMessage req setEndStream conn cofc stream sofc 
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
                 loop hdrs

@@ -5,7 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Network.GRPC (RPC(..), ClientStream, ServerStream, call, Timeout(..), Reply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..)) where
+module Network.GRPC (RPC(..), ClientStream, ServerStream, Timeout(..), Reply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..)) where
 
 import Control.Exception (Exception(..), throwIO)
 import Control.Monad (forever)
@@ -75,41 +75,6 @@ instance Exception InvalidState where
 
 -- | The HTTP2-Authority portion of an URL (e.g., "dicioccio.fr:7777").
 type Authority = ByteString.ByteString
-
--- | Call and wait (possibly forever for now) for a reply.
-call :: (Show (Input rpc), RPC rpc)
-     => Http2Client
-     -- ^ A connected HTTP2 client.
-     -> OutgoingFlowControl
-     -- ^ The connection outgoing flow control.
-     -> Authority
-     -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
-     -> HeaderList
-     -- ^ A set of HTTP2 headers (e.g., for adding authentication headers).
-     -> Timeout
-     -- ^ Timeout in seconds.
-     -> rpc
-     -- ^ The RPC you want to call (for instance, Greeter_SayHello).
-     -> Input rpc
-     -- ^ The RPC input message.
-     -> IO (Either TooMuchConcurrency (Reply (Output rpc)))
-call conn ocfc authority extraheaders timeout rpc req = do
-    let request = [ (":method", "POST")
-                  , (":scheme", "http")
-                  , (":authority", authority)
-                  , (":path", path rpc)
-                  , ("grpc-timeout", showTimeout timeout)
-                  , ("content-type", "application/grpc+proto")
-                  , ("te", "trailers")
-                  ] <> extraheaders
-    withHttp2Stream conn $ \stream ->
-        let
-            initStream = headers stream request (setEndHeader)
-            handler isfc osfc = do
-                sendSingleMessage req setEndStream conn ocfc stream osfc 
-                waitReply stream isfc                
-
-        in StreamDefinition initStream handler
 
 newtype RPCCall rpc a = RPCCall {
     runRPC :: rpc 

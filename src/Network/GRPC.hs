@@ -144,7 +144,9 @@ streamReply req handler = RPCCall $ \_ conn _ cofc stream flowControl sofc -> do
                 _addCredit flowControl (ByteString.length dat)
                 _ <- _consumeCredit flowControl (ByteString.length dat)
                 _ <- _updateWindow flowControl
-                handler hdrs (decodeResult dat)
+		-- TODO: buffer data if could not decode a full message or when
+		-- decoding more than one message
+		handler hdrs (decodeResult dat)
                 loop hdrs
     } in do
         sendSingleMessage req setEndStream conn cofc stream sofc 
@@ -159,14 +161,16 @@ data StreamDone = StreamDone
 streamRequest :: (Message (Input n), ClientStream n)
               => (IO (Either StreamDone (Input n)))
               -> RPCCall n ()
-streamRequest handler = RPCCall $ \_ conn _ connectionFlowControl stream _ streamFlowControl -> do
-    forever $ do
-        nextEvent <- handler
-        case nextEvent of
-            Right msg ->
-                sendSingleMessage msg id conn connectionFlowControl stream streamFlowControl
-            Left _ ->
-                sendData conn stream setEndStream ""
+streamRequest handler = RPCCall $ \_ conn _ connectionFlowControl stream _ streamFlowControl ->
+    let go = do
+            nextEvent <- handler
+            case nextEvent of
+                Right msg -> do
+                    sendSingleMessage msg id conn connectionFlowControl stream streamFlowControl
+                    go
+                Left _ ->
+                    sendData conn stream setEndStream ""
+    in go
 
 sendSingleMessage :: Message a
                   => a

@@ -168,18 +168,19 @@ streamReply req handler = RPCCall $ \_ conn _ cofc stream flowControl sofc -> do
 
 data StreamDone = StreamDone
 
-streamRequest :: (Message (Input n), ClientStream n)
+streamRequest :: (Message (Input n), Message (Output n), ClientStream n)
               => (IO (Either StreamDone (Input n)))
-              -> RPCCall n ()
-streamRequest handler = RPCCall $ \_ conn _ connectionFlowControl stream _ streamFlowControl ->
+              -> RPCCall n (RawReply (Output n))
+streamRequest handler = RPCCall $ \_ conn _ connectionFlowControl stream isfc streamFlowControl ->
     let go = do
             nextEvent <- handler
             case nextEvent of
                 Right msg -> do
                     sendSingleMessage msg id conn connectionFlowControl stream streamFlowControl
                     go
-                Left _ ->
+                Left _ -> do
                     sendData conn stream setEndStream ""
+                    waitReply stream isfc
     in go
 
 sendSingleMessage :: Message a

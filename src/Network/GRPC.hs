@@ -30,7 +30,7 @@ class (Message (Input n), Message (Output n)) => RPC n where
 class ClientStream n where
 
 class ServerStream n where
-  
+
 decodeResult :: Message a => Decoder (Either String a)
 decodeResult = runGetIncremental $ do
     0 <- getInt8      -- 1byte
@@ -79,10 +79,8 @@ instance Exception InvalidState where
 type Authority = ByteString.ByteString
 
 newtype RPCCall rpc a = RPCCall {
-    runRPC :: rpc 
+    runRPC :: rpc
            -> Http2Client
-           -> IncomingFlowControl
-           -> OutgoingFlowControl
            -> Http2Stream
            -> IncomingFlowControl
            -> OutgoingFlowControl
@@ -98,10 +96,6 @@ showTimeout (Timeout n) = ByteString.pack $ show n ++ "S"
 open :: RPC rpc
      => Http2Client
      -- ^ A connected HTTP2 client.
-     -> IncomingFlowControl
-     -- ^ The connection incoming flow control.
-     -> OutgoingFlowControl
-     -- ^ The connection outgoing flow control.
      -> Authority
      -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
      -> HeaderList
@@ -113,7 +107,9 @@ open :: RPC rpc
      -> RPCCall rpc a
      -- ^ The actual RPC handler.
      -> IO (Either TooMuchConcurrency a)
-open conn icfc ocfc authority extraheaders timeout rpc doStuff = do
+open conn authority extraheaders timeout rpc doStuff = do
+    let icfc = _incomingFlowControl conn
+    let ocfc = _outgoingFlowControl conn
     let request = [ (":method", "POST")
                   , (":scheme", "http")
                   , (":authority", authority)
@@ -126,14 +122,14 @@ open conn icfc ocfc authority extraheaders timeout rpc doStuff = do
         let
             initStream = headers stream request (setEndHeader)
             handler isfc osfc = do
-                (runRPC doStuff) rpc conn icfc ocfc stream isfc osfc
+                (runRPC doStuff) rpc conn stream isfc osfc
         in StreamDefinition initStream handler
 
 streamReply :: (Show (Input n), Message (Input n), Message (Output n), ServerStream n)
             => Input n
             -> (HeaderList -> Either String (Output n) -> IO ())
             -> RPCCall n (HeaderList, HeaderList)
-streamReply req handler = RPCCall $ \_ conn _ cofc stream flowControl sofc -> do
+streamReply req handler = RPCCall $ \_ conn stream isfc osfc -> do
     let {
         loop decoder hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
@@ -143,12 +139,13 @@ streamReply req handler = RPCCall $ \_ conn _ cofc stream flowControl sofc -> do
             (StreamErrorEvent _ _) ->
                 throwIO (InvalidState "stream error")
             (StreamDataEvent _ dat) -> do
-                _addCredit flowControl (ByteString.length dat)
-                _ <- _consumeCredit flowControl (ByteString.length dat)
-                _ <- _updateWindow flowControl
+                _addCredit isfc (ByteString.length dat)
+                _ <- _consumeCredit isfc (ByteString.length dat)
+                _ <- _updateWindow isfc
                 handleAllChunks hdrs decoder dat loop
     } in do
-        sendSingleMessage req setEndStream conn cofc stream sofc 
+        let ocfc = _outgoingFlowControl conn
+        sendSingleMessage req setEndStream conn ocfc stream osfc
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
                 loop decodeResult hdrs
@@ -171,12 +168,13 @@ data StreamDone = StreamDone
 streamRequest :: (Message (Input n), Message (Output n), ClientStream n)
               => (IO (Either StreamDone (Input n)))
               -> RPCCall n (RawReply (Output n))
-streamRequest handler = RPCCall $ \_ conn _ connectionFlowControl stream isfc streamFlowControl ->
-    let go = do
+streamRequest handler = RPCCall $ \_ conn stream isfc streamFlowControl ->
+    let ocfc = _outgoingFlowControl conn
+        go = do
             nextEvent <- handler
             case nextEvent of
                 Right msg -> do
-                    sendSingleMessage msg id conn connectionFlowControl stream streamFlowControl
+                    sendSingleMessage msg id conn ocfc stream streamFlowControl
                     go
                 Left _ -> do
                     sendData conn stream setEndStream ""
@@ -212,6 +210,7 @@ sendSingleMessage msg flagMod conn connectionFlowControl stream streamFlowContro
 singleRequest :: (Message (Input n), Message (Output n))
               => Input n
               -> RPCCall n (RawReply (Output n))
-singleRequest msg = RPCCall $ \_ conn _ ocfc stream isfc osfc -> do
+singleRequest msg = RPCCall $ \_ conn stream isfc osfc -> do
+    let ocfc = _outgoingFlowControl conn
     sendSingleMessage msg setEndStream conn ocfc stream osfc
     waitReply stream isfc

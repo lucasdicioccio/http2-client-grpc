@@ -12,7 +12,7 @@ import Control.Monad (forever)
 import Data.Monoid ((<>))
 import Data.ByteString.Lazy (fromStrict, toStrict)
 import Data.Binary.Builder (toLazyByteString, fromByteString, singleton, putWord32be)
-import Data.Binary.Get (getByteString, getInt8, getWord32be, runGet)
+import Data.Binary.Get (Decoder(..), getByteString, getInt8, getWord32be, pushChunk, pushEndOfInput, runGetIncremental)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.ProtoLens.Encoding (encodeMessage, decodeMessage)
 import Data.ProtoLens.Message (Message)
@@ -31,21 +31,16 @@ class ClientStream n where
 
 class ServerStream n where
   
-decodeResult :: Message a => ByteString.ByteString -> Either String a
-decodeResult bin
-  | ByteString.length bin < fromIntegral 5 =
-        Left "not enough data for small in-data Proto header"
-  | otherwise =
-        runGet go (fromStrict bin)
-  where
-    go = do
-        0 <- getInt8      -- 1byte
-        n <- getWord32be  -- 4bytes
-        if ByteString.length bin < fromIntegral (5 + n)
-        then
-            return $ Left "not enough data for decoding"
-        else 
-            decodeMessage <$> getByteString (fromIntegral n)
+decodeResult :: Message a => Decoder (Either String a)
+decodeResult = runGetIncremental $ do
+    0 <- getInt8      -- 1byte
+    n <- getWord32be  -- 4bytes
+    decodeMessage <$> getByteString (fromIntegral n)
+
+fromDecoder :: Decoder (Either String a) -> Either String a
+fromDecoder (Fail _ _ msg) = Left msg
+fromDecoder (Partial _)    = Left "got only a subet of the message"
+fromDecoder (Done _ _ val) = val
 
 -- | A reply.
 --
@@ -72,7 +67,10 @@ waitReply stream flowControl = do
     format :: Message a => Either ErrorCode StreamResponse -> RawReply a
     format rsp = do
        (hdrs, dat, trls) <- rsp
-       return (hdrs, trls, decodeResult dat)
+       return (hdrs, trls, fromDecoder $ pushEndOfInput $ flip pushChunk dat $ decodeResult)
+
+data StreamReplyDecodingError = StreamReplyDecodingError String deriving Show
+instance Exception StreamReplyDecodingError where
 
 data InvalidState = InvalidState String deriving Show
 instance Exception InvalidState where
@@ -137,7 +135,7 @@ streamReply :: (Show (Input n), Message (Input n), Message (Output n), ServerStr
             -> RPCCall n (HeaderList, HeaderList)
 streamReply req handler = RPCCall $ \_ conn _ cofc stream flowControl sofc -> do
     let {
-        loop hdrs = _waitEvent stream >>= \case
+        loop decoder hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
                 throwIO (InvalidState "push promise")
             (StreamHeadersEvent _ trls) ->
@@ -148,17 +146,25 @@ streamReply req handler = RPCCall $ \_ conn _ cofc stream flowControl sofc -> do
                 _addCredit flowControl (ByteString.length dat)
                 _ <- _consumeCredit flowControl (ByteString.length dat)
                 _ <- _updateWindow flowControl
-		-- TODO: buffer data if could not decode a full message or when
-		-- decoding more than one message
-		handler hdrs (decodeResult dat)
-                loop hdrs
+                handleAllChunks hdrs decoder dat loop
     } in do
         sendSingleMessage req setEndStream conn cofc stream sofc 
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
-                loop hdrs
+                loop decodeResult hdrs
             _                         ->
                 throwIO (InvalidState "no headers")
+  where
+    handleAllChunks hdrs decoder dat exitLoop =
+       case pushChunk decoder dat of
+           (Done unusedDat _ val) -> do
+               handler hdrs val
+               handleAllChunks hdrs decodeResult unusedDat exitLoop
+           failure@(Fail _ _ err)   -> do
+               handler hdrs (fromDecoder failure)
+               throwIO (StreamReplyDecodingError err)
+           partial@(Partial _)    ->
+               exitLoop partial hdrs
 
 data StreamDone = StreamDone
 

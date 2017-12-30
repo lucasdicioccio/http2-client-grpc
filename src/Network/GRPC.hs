@@ -5,7 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Network.GRPC (RPC(..), ClientStream, ServerStream, Timeout(..), Reply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..)) where
+module Network.GRPC (RPC(..), ClientStream, ServerStream, Timeout(..), RawReply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..)) where
 
 import Control.Exception (Exception(..), throwIO)
 import Control.Monad (forever)
@@ -32,14 +32,18 @@ class ClientStream n where
 class ServerStream n where
   
 decodeResult :: Message a => ByteString.ByteString -> Either String a
-decodeResult bin = runGet go (fromStrict bin)
+decodeResult bin
+  | ByteString.length bin < fromIntegral 5 =
+        Left "not enough data for small in-data Proto header"
+  | otherwise =
+        runGet go (fromStrict bin)
   where
     go = do
-        0 <- getInt8
-        n <- getWord32be
-        if ByteString.length bin < fromIntegral (1 + 4 + n)
+        0 <- getInt8      -- 1byte
+        n <- getWord32be  -- 4bytes
+        if ByteString.length bin < fromIntegral (5 + n)
         then
-            fail "not enough data for decoding"
+            return $ Left "not enough data for decoding"
         else 
             decodeMessage <$> getByteString (fromIntegral n)
 
@@ -53,7 +57,7 @@ decodeResult bin = runGet go (fromStrict bin)
 -- - 1st item: initial HTTP2 response
 -- - 2nd item: second (trailers) HTTP2 response
 -- - 3rd item: proper gRPC answer
-type Reply a = Either ErrorCode (HeaderList, Maybe HeaderList, (Either String a))
+type RawReply a = Either ErrorCode (HeaderList, Maybe HeaderList, (Either String a))
 
 data UnallowedPushPromiseReceived = UnallowedPushPromiseReceived deriving Show
 instance Exception UnallowedPushPromiseReceived where
@@ -61,12 +65,12 @@ instance Exception UnallowedPushPromiseReceived where
 throwOnPushPromise :: PushPromiseHandler
 throwOnPushPromise _ _ _ _ _ = throwIO UnallowedPushPromiseReceived
 
-waitReply :: Message a => Http2Stream -> IncomingFlowControl -> IO (Reply a)
+waitReply :: Message a => Http2Stream -> IncomingFlowControl -> IO (RawReply a)
 waitReply stream flowControl = do
-    f . fromStreamResult <$> waitStream stream flowControl throwOnPushPromise
+    format . fromStreamResult <$> waitStream stream flowControl throwOnPushPromise
   where
-    f :: Message a => Either ErrorCode StreamResponse -> Reply a
-    f rsp = do
+    format :: Message a => Either ErrorCode StreamResponse -> RawReply a
+    format rsp = do
        (hdrs, dat, trls) <- rsp
        return (hdrs, trls, decodeResult dat)
 
@@ -200,7 +204,7 @@ sendSingleMessage msg flagMod conn connectionFlowControl stream streamFlowContro
 
 singleRequest :: (Message (Input n), Message (Output n))
               => Input n
-              -> RPCCall n (Reply (Output n))
+              -> RPCCall n (RawReply (Output n))
 singleRequest msg = RPCCall $ \_ conn _ ocfc stream isfc osfc -> do
     sendSingleMessage msg setEndStream conn ocfc stream osfc
     waitReply stream isfc

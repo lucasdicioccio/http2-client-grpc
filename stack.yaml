@@ -49,7 +49,7 @@ packages:
   extra-dep: true
 - location:
     git: https://github.com/lucasdicioccio/http2-client.git
-    commit: 45271788d9164ddbed2ed47489a589d14421c697
+    commit: v0.6.0.0
   extra-dep: true
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)

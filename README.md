@@ -54,6 +54,10 @@ you'll have to automate these steps outside your Haskell toolchain.
 
 In short, use `http2-client` with the `Network.GRPC.call` function and let the types guide you.
 
+### Example
+
+You'll find an example leveraging the awesome `grpcb.in` service at https://github.com/lucasdicioccio/http2-client-grpc-example .
+
 ### gRPC service mapping
 
 The Protobuf format specifies the notion of Service which can have one or more RPCs.
@@ -80,4 +84,4 @@ This library is currently experimental.
 
 - pass timeout as argument
 - support compression
-- support streaming RPCs
+- provide function to map raw results into commonly-understood GRPC errors

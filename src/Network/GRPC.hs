@@ -5,8 +5,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Network.GRPC (RPC(..), ClientStream, ServerStream, Timeout(..), RawReply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..)) where
+module Network.GRPC (RPC(..), ClientStream, ServerStream, Timeout(..), RawReply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..), Compression, gzip, uncompressed) where
 
+import qualified Codec.Compression.GZip as GZip
 import Control.Exception (Exception(..), throwIO)
 import Control.Monad (forever)
 import Data.Monoid ((<>))
@@ -33,9 +34,10 @@ class ServerStream n where
 
 decodeResult :: Message a => Decoder (Either String a)
 decodeResult = runGetIncremental $ do
-    0 <- getInt8      -- 1byte
+    isCompressed <- getInt8      -- 1byte
+    let compression = if isCompressed == 0 then id else (toStrict . GZip.decompress . fromStrict)
     n <- getWord32be  -- 4bytes
-    decodeMessage <$> getByteString (fromIntegral n)
+    decodeMessage . compression <$> getByteString (fromIntegral n)
 
 fromDecoder :: Decoder (Either String a) -> Either String a
 fromDecoder (Fail _ _ msg) = Left msg
@@ -102,12 +104,18 @@ open :: RPC rpc
      -- ^ A set of HTTP2 headers (e.g., for adding authentication headers).
      -> Timeout
      -- ^ Timeout in seconds.
+     -> Compression
+     -- ^ An indication of the compression that you will be using.  Compression
+     -- should be per message, however a bug in gRPC-Go (to be confirmed) seems
+     -- to turn message compression mandatory if advertised in the HTTP2
+     -- headers, even though the specification states that compression per
+     -- message is optional irrespectively of headers.
      -> rpc
      -- ^ The RPC to call.
      -> RPCCall rpc a
      -- ^ The actual RPC handler.
      -> IO (Either TooMuchConcurrency a)
-open conn authority extraheaders timeout rpc doStuff = do
+open conn authority extraheaders timeout compression rpc doStuff = do
     let icfc = _incomingFlowControl conn
     let ocfc = _outgoingFlowControl conn
     let request = [ (":method", "POST")
@@ -115,6 +123,8 @@ open conn authority extraheaders timeout rpc doStuff = do
                   , (":authority", authority)
                   , (":path", path rpc)
                   , ("grpc-timeout", showTimeout timeout)
+                  , ("grpc-encoding", _compressionName compression)
+                  , ("grpc-accept-encoding", "identity,gzip")
                   , ("content-type", "application/grpc+proto")
                   , ("te", "trailers")
                   ] <> extraheaders
@@ -126,10 +136,11 @@ open conn authority extraheaders timeout rpc doStuff = do
         in StreamDefinition initStream handler
 
 streamReply :: (Show (Input n), Message (Input n), Message (Output n), ServerStream n)
-            => Input n
+            => Compression
+            -> Input n
             -> (HeaderList -> Either String (Output n) -> IO ())
             -> RPCCall n (HeaderList, HeaderList)
-streamReply req handler = RPCCall $ \_ conn stream isfc osfc -> do
+streamReply compress req handler = RPCCall $ \_ conn stream isfc osfc -> do
     let {
         loop decoder hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
@@ -145,7 +156,7 @@ streamReply req handler = RPCCall $ \_ conn stream isfc osfc -> do
                 handleAllChunks hdrs decoder dat loop
     } in do
         let ocfc = _outgoingFlowControl conn
-        sendSingleMessage req setEndStream conn ocfc stream osfc
+        sendSingleMessage req compress setEndStream conn ocfc stream osfc
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
                 loop decodeResult hdrs
@@ -166,30 +177,32 @@ streamReply req handler = RPCCall $ \_ conn stream isfc osfc -> do
 data StreamDone = StreamDone
 
 streamRequest :: (Message (Input n), Message (Output n), ClientStream n)
-              => (IO (Either StreamDone (Input n)))
+              => (IO (Either StreamDone (Input n, Compression)))
               -> RPCCall n (RawReply (Output n))
 streamRequest handler = RPCCall $ \_ conn stream isfc streamFlowControl ->
     let ocfc = _outgoingFlowControl conn
         go = do
             nextEvent <- handler
             case nextEvent of
-                Right msg -> do
-                    sendSingleMessage msg id conn ocfc stream streamFlowControl
+                Right (msg, compress) -> do
+                    sendSingleMessage msg compress id conn ocfc stream streamFlowControl
                     go
                 Left _ -> do
                     sendData conn stream setEndStream ""
                     waitReply stream isfc
     in go
 
+
 sendSingleMessage :: Message a
                   => a
+                  -> Compression
                   -> FlagSetter
                   -> Http2Client
                   -> OutgoingFlowControl
                   -> Http2Stream
                   -> OutgoingFlowControl
                   -> IO ()
-sendSingleMessage msg flagMod conn connectionFlowControl stream streamFlowControl = do
+sendSingleMessage msg compression flagMod conn connectionFlowControl stream streamFlowControl = do
     let goUpload dat = do
             let !wanted = ByteString.length dat
             gotStream <- _withdrawCredit streamFlowControl wanted
@@ -203,14 +216,29 @@ sendSingleMessage msg flagMod conn connectionFlowControl stream streamFlowContro
                 goUpload (ByteString.drop got dat)
     goUpload . toStrict . toLazyByteString . encodePlainMessage $ msg
   where
+    compressedByte = if _compressionByteSet compression then 1 else 0
+    compressMethod = _compressionFunction compression
     encodePlainMessage plain =
         let bin = encodeMessage plain
-        in singleton 0 <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString bin
+        in singleton compressedByte <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString (compressMethod $ bin)
 
 singleRequest :: (Message (Input n), Message (Output n))
-              => Input n
+              => Compression
+              -> Input n
               -> RPCCall n (RawReply (Output n))
-singleRequest msg = RPCCall $ \_ conn stream isfc osfc -> do
+singleRequest compress msg = RPCCall $ \_ conn stream isfc osfc -> do
     let ocfc = _outgoingFlowControl conn
-    sendSingleMessage msg setEndStream conn ocfc stream osfc
+    sendSingleMessage msg compress setEndStream conn ocfc stream osfc
     waitReply stream isfc
+
+data Compression = Compression {
+    _compressionName    :: ByteString.ByteString
+  , _compressionByteSet :: Bool
+  , _compressionFunction :: (ByteString.ByteString -> ByteString.ByteString)
+  }
+
+gzip :: Compression
+gzip = Compression "gzip" True (toStrict . GZip.compress . fromStrict)
+
+uncompressed :: Compression
+uncompressed = Compression "identity" False id

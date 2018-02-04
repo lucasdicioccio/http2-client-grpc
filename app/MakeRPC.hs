@@ -84,8 +84,11 @@ generateFiles header files toGenerate = let
   filesByName = analyzeProtoFiles modulePrefix files
   -- The contents of the generated Haskell file for a given .proto file.
   modulesToBuild f protoF = let
-      deps = descriptor f ^. dependency
-      imports = [ haskellModule protoF ]
+      depImports = [ haskellModule protoFdep
+                   | dep <- descriptor f ^. dependency
+                   , let protoFdep = protofilesByName ! dep
+                   ]
+      imports = haskellModule protoF : depImports
       in [ makeModule f imports ]
   in [ ( outputFilePath $ prettyPrint modName
        , header (descriptor f) <> pack (prettyPrint modul)

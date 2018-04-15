@@ -11,6 +11,7 @@ import qualified Codec.Compression.GZip as GZip
 import Control.Exception (Exception(..), throwIO)
 import Control.Monad (forever)
 import Data.Monoid ((<>))
+import Data.ByteString.Char8 (unpack)
 import Data.ByteString.Lazy (fromStrict, toStrict)
 import Data.Binary.Builder (toLazyByteString, fromByteString, singleton, putWord32be)
 import Data.Binary.Get (Decoder(..), getByteString, getInt8, getWord32be, pushChunk, pushEndOfInput, runGetIncremental)
@@ -69,7 +70,12 @@ waitReply stream flowControl = do
     format :: Message a => Either ErrorCode StreamResponse -> RawReply a
     format rsp = do
        (hdrs, dat, trls) <- rsp
-       return (hdrs, trls, fromDecoder $ pushEndOfInput $ flip pushChunk dat $ decodeResult)
+       let res =
+             case lookup "grpc-message" hdrs of
+               Nothing     -> fromDecoder $ pushEndOfInput $ flip pushChunk dat $ decodeResult
+               Just errMsg -> Left $ unpack errMsg
+
+       return (hdrs, trls, res)
 
 data StreamReplyDecodingError = StreamReplyDecodingError String deriving Show
 instance Exception StreamReplyDecodingError where

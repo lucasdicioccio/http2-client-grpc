@@ -16,7 +16,7 @@ import Proto.Google.Protobuf.Compiler.Plugin
     ( CodeGeneratorRequest
     , CodeGeneratorResponse
     )
-import Proto.Google.Protobuf.Compiler.Plugin'Fields
+import Proto.Google.Protobuf.Compiler.Plugin_Fields
     ( file
     , name
     , content
@@ -32,7 +32,7 @@ import Proto.Google.Protobuf.Descriptor
     , ServiceDescriptorProto
     , MethodDescriptorProto
     )
-import Proto.Google.Protobuf.Descriptor'Fields
+import Proto.Google.Protobuf.Descriptor_Fields
     ( dependency
     , service
     , method

@@ -1,40 +1,49 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BangPatterns        #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeFamilies        #-}
 
-module Network.GRPC (RPC(..), ClientStream, ServerStream, Timeout(..), RawReply, Authority, open, RPCCall(..), singleRequest, streamReply, streamRequest, StreamDone(..), Compression, gzip, uncompressed) where
+module Network.GRPC (Timeout(..), RawReply, Authority, open, singleRequest, streamReply, streamRequest, StreamDone(..), Compression, gzip, uncompressed, RPC(..)) where
 
 import qualified Codec.Compression.GZip as GZip
 import Control.Exception (Exception(..), throwIO)
 import Control.Monad (forever)
+import Data.Proxy (Proxy(..))
 import Data.Monoid ((<>))
-import Data.ByteString.Char8 (unpack)
+import Data.ByteString.Char8 (ByteString, pack, unpack)
 import Data.ByteString.Lazy (fromStrict, toStrict)
 import Data.Binary.Builder (toLazyByteString, fromByteString, singleton, putWord32be)
 import Data.Binary.Get (Decoder(..), getByteString, getInt8, getWord32be, pushChunk, pushEndOfInput, runGetIncremental)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.ProtoLens.Encoding (encodeMessage, decodeMessage)
 import Data.ProtoLens.Message (Message)
+import Data.ProtoLens.Service.Types (Service(..), HasMethod, HasMethodImpl(..), StreamingType(..))
+import GHC.TypeLits (Symbol, symbolVal)
 
 import Network.HTTP2
 import Network.HPACK
 import Network.HTTP2.Client
 import Network.HTTP2.Client.Helpers
 
-class (Message (Input n), Message (Output n)) => RPC n where
-  type Input n
-  type Output n
-  path :: n -> ByteString.ByteString
+data RPC (s :: *) (m :: Symbol) = RPC
 
-class ClientStream n where
+path :: (Service s, HasMethod s m) => RPC s m -> ByteString
+path rpc = "/" <> pkg rpc Proxy <> "." <> srv rpc Proxy <> "/" <> meth rpc Proxy
+  where
+    pkg :: (Service s) => RPC s m -> Proxy (ServicePackage s) -> ByteString
+    pkg _ p = pack $ symbolVal p
 
-class ServerStream n where
+    srv :: (Service s) => RPC s m -> Proxy (ServiceName s) -> ByteString
+    srv _ p = pack $ symbolVal p
 
-decodeResult :: Message a => Decoder (Either String a)
-decodeResult = runGetIncremental $ do
+    meth :: (Service s, HasMethod s m) => RPC s m -> Proxy (MethodName s m) -> ByteString
+    meth _ p = pack $ symbolVal p
+
+decodeResult :: (Service s, HasMethod s m) => RPC s m -> Decoder (Either String (MethodOutput s m))
+decodeResult _ = runGetIncremental $ do
     isCompressed <- getInt8      -- 1byte
     let compression = if isCompressed == 0 then id else (toStrict . GZip.decompress . fromStrict)
     n <- getWord32be  -- 4bytes
@@ -63,16 +72,15 @@ instance Exception UnallowedPushPromiseReceived where
 throwOnPushPromise :: PushPromiseHandler
 throwOnPushPromise _ _ _ _ _ = throwIO UnallowedPushPromiseReceived
 
-waitReply :: Message a => Http2Stream -> IncomingFlowControl -> IO (RawReply a)
-waitReply stream flowControl = do
+waitReply :: (Service s, HasMethod s m) => RPC s m -> Http2Stream -> IncomingFlowControl -> IO (RawReply (MethodOutput s m))
+waitReply rpc stream flowControl = do
     format . fromStreamResult <$> waitStream stream flowControl throwOnPushPromise
   where
-    format :: Message a => Either ErrorCode StreamResponse -> RawReply a
     format rsp = do
        (hdrs, dat, trls) <- rsp
        let res =
              case lookup "grpc-message" hdrs of
-               Nothing     -> fromDecoder $ pushEndOfInput $ flip pushChunk dat $ decodeResult
+               Nothing     -> fromDecoder $ pushEndOfInput $ flip pushChunk dat $ decodeResult rpc
                Just errMsg -> Left $ unpack errMsg
 
        return (hdrs, trls, res)
@@ -86,23 +94,19 @@ instance Exception InvalidState where
 -- | The HTTP2-Authority portion of an URL (e.g., "dicioccio.fr:7777").
 type Authority = ByteString.ByteString
 
-newtype RPCCall rpc a = RPCCall {
-    runRPC :: rpc
-           -> Http2Client
-           -> Http2Stream
-           -> IncomingFlowControl
-           -> OutgoingFlowControl
-           -> IO a
+newtype RPCCall a = RPCCall {
+    runRPC :: Http2Client -> Http2Stream -> IncomingFlowControl -> OutgoingFlowControl -> IO a
   }
+
 
 data Timeout = Timeout Int
 
 showTimeout :: Timeout -> ByteString.ByteString
 showTimeout (Timeout n) = ByteString.pack $ show n ++ "S"
 
--- | Call and wait (possibly forever for now) for a reply.
-open :: RPC rpc
-     => Http2Client
+open :: (Service s, HasMethod s m)
+     => RPC s m
+     -> Http2Client
      -- ^ A connected HTTP2 client.
      -> Authority
      -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
@@ -116,18 +120,16 @@ open :: RPC rpc
      -- to turn message compression mandatory if advertised in the HTTP2
      -- headers, even though the specification states that compression per
      -- message is optional irrespectively of headers.
-     -> rpc
-     -- ^ The RPC to call.
-     -> RPCCall rpc a
+     -> RPCCall a
      -- ^ The actual RPC handler.
      -> IO (Either TooMuchConcurrency a)
-open conn authority extraheaders timeout compression rpc doStuff = do
+open rpc conn authority extraheaders timeout compression doStuff = do
     let icfc = _incomingFlowControl conn
     let ocfc = _outgoingFlowControl conn
     let request = [ (":method", "POST")
                   , (":scheme", "http")
                   , (":authority", authority)
-                  , (":path", path rpc)
+                  , (":path", path rpc) 
                   , ("grpc-timeout", showTimeout timeout)
                   , ("grpc-encoding", _compressionName compression)
                   , ("grpc-accept-encoding", "identity,gzip")
@@ -138,15 +140,17 @@ open conn authority extraheaders timeout compression rpc doStuff = do
         let
             initStream = headers stream request (setEndHeader)
             handler isfc osfc = do
-                (runRPC doStuff) rpc conn stream isfc osfc
+                (runRPC doStuff) conn stream isfc osfc
         in StreamDefinition initStream handler
 
-streamReply :: (Show (Input n), Message (Input n), Message (Output n), ServerStream n)
-            => Compression
-            -> Input n
-            -> (HeaderList -> Either String (Output n) -> IO ())
-            -> RPCCall n (HeaderList, HeaderList)
-streamReply compress req handler = RPCCall $ \_ conn stream isfc osfc -> do
+streamReply
+  :: (Service s, HasMethod s m, MethodStreamingType s m ~ ServerStreaming)
+  => RPC s m
+  -> Compression
+  -> MethodInput s m
+  -> (HeaderList -> Either String (MethodOutput s m) -> IO ())
+  -> RPCCall (HeaderList, HeaderList)
+streamReply rpc compress req handler = RPCCall $ \conn stream isfc osfc -> do
     let {
         loop decoder hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
@@ -165,7 +169,7 @@ streamReply compress req handler = RPCCall $ \_ conn stream isfc osfc -> do
         sendSingleMessage req compress setEndStream conn ocfc stream osfc
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
-                loop decodeResult hdrs
+                loop (decodeResult rpc) hdrs
             _                         ->
                 throwIO (InvalidState "no headers")
   where
@@ -173,7 +177,7 @@ streamReply compress req handler = RPCCall $ \_ conn stream isfc osfc -> do
        case pushChunk decoder dat of
            (Done unusedDat _ val) -> do
                handler hdrs val
-               handleAllChunks hdrs decodeResult unusedDat exitLoop
+               handleAllChunks hdrs (decodeResult rpc) unusedDat exitLoop
            failure@(Fail _ _ err)   -> do
                handler hdrs (fromDecoder failure)
                throwIO (StreamReplyDecodingError err)
@@ -182,10 +186,12 @@ streamReply compress req handler = RPCCall $ \_ conn stream isfc osfc -> do
 
 data StreamDone = StreamDone
 
-streamRequest :: (Message (Input n), Message (Output n), ClientStream n)
-              => (IO (Either StreamDone (Input n, Compression)))
-              -> RPCCall n (RawReply (Output n))
-streamRequest handler = RPCCall $ \_ conn stream isfc streamFlowControl ->
+streamRequest
+  :: (Service s, HasMethod s m, MethodStreamingType s m ~ ClientStreaming)
+  => RPC s m
+  -> (IO (Either StreamDone (MethodInput s m, Compression)))
+  -> RPCCall (RawReply (MethodOutput s m))
+streamRequest rpc handler = RPCCall $ \conn stream isfc streamFlowControl ->
     let ocfc = _outgoingFlowControl conn
         go = do
             nextEvent <- handler
@@ -195,7 +201,7 @@ streamRequest handler = RPCCall $ \_ conn stream isfc streamFlowControl ->
                     go
                 Left _ -> do
                     sendData conn stream setEndStream ""
-                    waitReply stream isfc
+                    waitReply rpc stream isfc
     in go
 
 
@@ -228,14 +234,16 @@ sendSingleMessage msg compression flagMod conn connectionFlowControl stream stre
         let bin = encodeMessage plain
         in singleton compressedByte <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString (compressMethod $ bin)
 
-singleRequest :: (Message (Input n), Message (Output n))
-              => Compression
-              -> Input n
-              -> RPCCall n (RawReply (Output n))
-singleRequest compress msg = RPCCall $ \_ conn stream isfc osfc -> do
+singleRequest
+  :: (Service s, HasMethod s m)
+  => RPC s m
+  -> Compression
+  -> MethodInput s m
+  -> RPCCall (RawReply (MethodOutput s m))
+singleRequest rpc compress msg = RPCCall $ \conn stream isfc osfc -> do
     let ocfc = _outgoingFlowControl conn
     sendSingleMessage msg compress setEndStream conn ocfc stream osfc
-    waitReply stream isfc
+    waitReply rpc stream isfc
 
 data Compression = Compression {
     _compressionName    :: ByteString.ByteString

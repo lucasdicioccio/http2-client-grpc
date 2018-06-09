@@ -1,16 +1,16 @@
 name:                http2-client-grpc
 version:             0.1.0.0
--- synopsis:
--- description:
+synopsis:            Implement gRPC-over-HTTP2 clients.
+description:         Uses http2-client and proto-lens to generate client code.
 homepage:            https://github.com/lucasdicioccio/http2-client-grpc#readme
 license:             BSD3
 license-file:        LICENSE
 author:              Lucas DiCioccio
 maintainer:          lucas@dicioccio.fr
 copyright:           2017 Lucas DiCioccio
-category:            Web
+category:            Network
 build-type:          Simple
-extra-source-files:  README.md, helloworld.proto
+extra-source-files:  README.md
 cabal-version:       >=1.10
 
 library

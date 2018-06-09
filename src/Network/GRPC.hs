@@ -6,7 +6,28 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies        #-}
 
-module Network.GRPC (Timeout(..), RawReply, Authority, open, singleRequest, streamReply, streamRequest, StreamDone(..), Compression, gzip, uncompressed, RPC(..)) where
+-- | A module adding support for gRPC over HTTP2.
+module Network.GRPC (
+  -- * Building blocks.
+    RPC(..)
+  , Authority
+  , Timeout(..)
+  , open
+  , RawReply
+  -- * Helpers
+  , singleRequest
+  , streamReply
+  , streamRequest
+  , StreamDone(..)
+  -- * Errors.
+  , InvalidState(..)
+  , StreamReplyDecodingError(..)
+  , UnallowedPushPromiseReceived(..)
+  -- * Compression of individual messages.
+  , Compression
+  , gzip
+  , uncompressed
+  ) where
 
 import qualified Codec.Compression.GZip as GZip
 import Control.Exception (Exception(..), throwIO)
@@ -28,8 +49,10 @@ import Network.HPACK
 import Network.HTTP2.Client
 import Network.HTTP2.Client.Helpers
 
+-- | A proxy type for giving static information about RPCs.
 data RPC (s :: *) (m :: Symbol) = RPC
 
+-- | Returns the HTTP2 :path for a given RPC.
 path :: (Service s, HasMethod s m) => RPC s m -> ByteString
 path rpc = "/" <> pkg rpc Proxy <> "." <> srv rpc Proxy <> "/" <> meth rpc Proxy
   where
@@ -42,6 +65,7 @@ path rpc = "/" <> pkg rpc Proxy <> "." <> srv rpc Proxy <> "/" <> meth rpc Proxy
     meth :: (Service s, HasMethod s m) => RPC s m -> Proxy (MethodName s m) -> ByteString
     meth _ p = pack $ symbolVal p
 
+-- | Decodes a method's output.
 decodeResult :: (Service s, HasMethod s m) => RPC s m -> Decoder (Either String (MethodOutput s m))
 decodeResult _ = runGetIncremental $ do
     isCompressed <- getInt8      -- 1byte
@@ -49,6 +73,7 @@ decodeResult _ = runGetIncremental $ do
     n <- getWord32be  -- 4bytes
     decodeMessage . compression <$> getByteString (fromIntegral n)
 
+-- | Tries finalizing a Decoder.
 fromDecoder :: Decoder (Either String a) -> Either String a
 fromDecoder (Fail _ _ msg) = Left msg
 fromDecoder (Partial _)    = Left "got only a subet of the message"
@@ -66,12 +91,17 @@ fromDecoder (Done _ _ val) = val
 -- - 3rd item: proper gRPC answer
 type RawReply a = Either ErrorCode (HeaderList, Maybe HeaderList, (Either String a))
 
+-- | gRPC disables HTTP2 push-promises.
+--
+-- If a server attempts to send push-promises, this exception will be raised.
 data UnallowedPushPromiseReceived = UnallowedPushPromiseReceived deriving Show
 instance Exception UnallowedPushPromiseReceived where
 
+-- | http2-client handler for push promise.
 throwOnPushPromise :: PushPromiseHandler
 throwOnPushPromise _ _ _ _ _ = throwIO UnallowedPushPromiseReceived
 
+-- | Wait for an RPC reply.
 waitReply :: (Service s, HasMethod s m) => RPC s m -> Http2Stream -> IncomingFlowControl -> IO (RawReply (MethodOutput s m))
 waitReply rpc stream flowControl = do
     format . fromStreamResult <$> waitStream stream flowControl throwOnPushPromise
@@ -85,27 +115,35 @@ waitReply rpc stream flowControl = do
 
        return (hdrs, trls, res)
 
+-- | Exception raised when a ServerStreaming RPC results in a decoding
+-- error.
 data StreamReplyDecodingError = StreamReplyDecodingError String deriving Show
 instance Exception StreamReplyDecodingError where
 
+-- | Exception raised when a ServerStreaming RPC results in an invalid
+-- state machine.
 data InvalidState = InvalidState String deriving Show
 instance Exception InvalidState where
 
 -- | The HTTP2-Authority portion of an URL (e.g., "dicioccio.fr:7777").
 type Authority = ByteString.ByteString
 
+-- | Newtype helper used to uniformize all type of streaming modes when
+-- passing arguments to the 'open' call.
 newtype RPCCall a = RPCCall {
     runRPC :: Http2Client -> Http2Stream -> IncomingFlowControl -> OutgoingFlowControl -> IO a
   }
 
-
-data Timeout = Timeout Int
+-- | Timeout in seconds.
+newtype Timeout = Timeout Int
 
 showTimeout :: Timeout -> ByteString.ByteString
 showTimeout (Timeout n) = ByteString.pack $ show n ++ "S"
 
+-- | Main handler to perform gRPC calls to a service.
 open :: (Service s, HasMethod s m)
      => RPC s m
+     -- ^ A token carrying information specifying the RPC to call.
      -> Http2Client
      -- ^ A connected HTTP2 client.
      -> Authority
@@ -143,6 +181,7 @@ open rpc conn authority extraheaders timeout compression doStuff = do
                 (runRPC doStuff) conn stream isfc osfc
         in StreamDefinition initStream handler
 
+-- | gRPC call for Server Streaming.
 streamReply
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ ServerStreaming)
   => RPC s m
@@ -186,6 +225,7 @@ streamReply rpc compress req handler = RPCCall $ \conn stream isfc osfc -> do
 
 data StreamDone = StreamDone
 
+-- | gRPC call for Client Streaming.
 streamRequest
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ ClientStreaming)
   => RPC s m
@@ -205,6 +245,7 @@ streamRequest rpc handler = RPCCall $ \conn stream isfc streamFlowControl ->
     in go
 
 
+-- | Serialize and send a single message.
 sendSingleMessage :: Message a
                   => a
                   -> Compression
@@ -234,6 +275,7 @@ sendSingleMessage msg compression flagMod conn connectionFlowControl stream stre
         let bin = encodeMessage plain
         in singleton compressedByte <> putWord32be (fromIntegral $ ByteString.length bin) <> fromByteString (compressMethod $ bin)
 
+-- | gRPC call for an unary request.
 singleRequest
   :: (Service s, HasMethod s m)
   => RPC s m
@@ -245,14 +287,20 @@ singleRequest rpc compress msg = RPCCall $ \conn stream isfc osfc -> do
     sendSingleMessage msg compress setEndStream conn ocfc stream osfc
     waitReply rpc stream isfc
 
+-- | Opaque type for handling compression.
+--
+-- So far, only "pure" compression algorithms are supported.
+-- TODO: suport IO-based compression implementations.
 data Compression = Compression {
     _compressionName    :: ByteString.ByteString
   , _compressionByteSet :: Bool
   , _compressionFunction :: (ByteString.ByteString -> ByteString.ByteString)
   }
 
+-- | Use gzip as compression.
 gzip :: Compression
 gzip = Compression "gzip" True (toStrict . GZip.compress . fromStrict)
 
+-- | Do not compress.
 uncompressed :: Compression
 uncompressed = Compression "identity" False id

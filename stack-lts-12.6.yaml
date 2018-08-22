@@ -1,0 +1,12 @@
+resolver: lts-12.6
+packages:
+- .
+extra-deps:
+- http2-client-0.8.0.1
+- lens-labels-0.2.0.1
+- proto-lens-0.3.1.0
+- proto-lens-combinators-0.1.0.10
+- proto-lens-protobuf-types-0.3.0.1
+- proto-lens-protoc-0.3.1.0
+flags: {}
+extra-package-dbs: []

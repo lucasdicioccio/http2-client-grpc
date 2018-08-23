@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeFamilies        #-}
 
 -- | A module adding support for gRPC over HTTP2.
-module Network.GRPC (
+module Network.GRPC.Client (
   -- * Building blocks.
     RPC(..)
   , Authority

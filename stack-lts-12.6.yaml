@@ -1,6 +1,7 @@
 resolver: lts-12.6
 packages:
 - .
+- ../http2-grpc-types
 extra-deps:
 - http2-client-0.8.0.1
 - lens-labels-0.2.0.1

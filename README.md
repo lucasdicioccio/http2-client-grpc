@@ -72,5 +72,5 @@ This library is currently an early-stage library. Expect breaking changes.
 ## TODOs
 
 - pass timeout as argument
-- support compression
+- support effectful compression (Zlib pure compression is supported)
 - provide function to map raw results into commonly-understood GRPC errors

@@ -110,7 +110,7 @@ open :: (Service s, HasMethod s m)
      -> Timeout
      -- ^ Timeout in seconds.
      -> Compression
-     -- ^ An indication of the compression that you will be using.  Compression
+     -- ^ An indication of the compression that you will be using and accepting.  Compression
      -- should be per message, however a bug in gRPC-Go (to be confirmed) seems
      -- to turn message compression mandatory if advertised in the HTTP2
      -- headers, even though the specification states that compression per
@@ -125,7 +125,7 @@ open rpc conn authority extraheaders timeout compression doStuff = do
                   , (":path", path rpc) 
                   , (grpcTimeoutH, showTimeout timeout)
                   , (grpcEncodingH, grpcCompressionHV compression)
-                  , (grpcAcceptEncodingH, grpcAcceptEncodingHVdefault)
+                  , (grpcAcceptEncodingH, mconcat [grpcAcceptEncodingHVdefault, ",", grpcCompressionHV compression])
                   , ("content-type", grpcContentTypeHV)
                   , ("te", "trailers")
                   ] <> extraheaders

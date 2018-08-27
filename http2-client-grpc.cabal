@@ -22,7 +22,7 @@ library
                      , data-default-class
                      , http2
                      , http2-client
-                     , http2-grpc-types
+                     , http2-grpc-types >= 0.2
                      , proto-lens
                      , proto-lens-protoc
                      , text

@@ -37,6 +37,7 @@ import Data.Binary.Builder (toLazyByteString)
 import Data.Binary.Get (Decoder(..), pushChunk, pushEndOfInput)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.ProtoLens.Service.Types (Service(..), HasMethod, HasMethodImpl(..), StreamingType(..))
+import GHC.TypeLits (Symbol)
 
 import Network.GRPC.HTTP2.Types
 import Network.GRPC.HTTP2.Encoding
@@ -93,15 +94,17 @@ instance Exception InvalidState where
 
 -- | Newtype helper used to uniformize all type of streaming modes when
 -- passing arguments to the 'open' call.
-newtype RPCCall a = RPCCall {
+newtype RPCCall s (m ::Symbol) a = RPCCall {
     runRPC :: Http2Client -> Http2Stream -> IncomingFlowControl -> OutgoingFlowControl -> IO a
   }
 
+-- | Helper to get the proxy object from an RPCCall.
+rpcFromCall :: RPCCall s m a -> RPC s m
+rpcFromCall _ = RPC
+
 -- | Main handler to perform gRPC calls to a service.
 open :: (Service s, HasMethod s m)
-     => RPC s m
-     -- ^ A token carrying information specifying the RPC to call.
-     -> Http2Client
+     => Http2Client
      -- ^ A connected HTTP2 client.
      -> Authority
      -- ^ The HTTP2-Authority portion of the URL (e.g., "dicioccio.fr:7777").
@@ -115,10 +118,11 @@ open :: (Service s, HasMethod s m)
      -- to turn message compression mandatory if advertised in the HTTP2
      -- headers, even though the specification states that compression per
      -- message is optional irrespectively of headers.
-     -> RPCCall a
+     -> RPCCall s m a
      -- ^ The actual RPC handler.
      -> IO (Either TooMuchConcurrency a)
-open rpc conn authority extraheaders timeout compression doStuff = do
+open conn authority extraheaders timeout compression call = do
+    let rpc = rpcFromCall call
     let request = [ (":method", "POST")
                   , (":scheme", "http")
                   , (":authority", authority)
@@ -133,7 +137,7 @@ open rpc conn authority extraheaders timeout compression doStuff = do
         let
             initStream = headers stream request (setEndHeader)
             handler isfc osfc = do
-                (runRPC doStuff) conn stream isfc osfc
+                (runRPC call) conn stream isfc osfc
         in StreamDefinition initStream handler
 
 -- | gRPC call for Server Streaming.
@@ -150,7 +154,7 @@ streamReply
   -- ^ The input.
   -> (a -> HeaderList -> MethodOutput s m -> IO a)
   -- ^ A state-passing handler that is called with the message read.
-  -> RPCCall (a, HeaderList, HeaderList)
+  -> RPCCall s m (a, HeaderList, HeaderList)
 streamReply rpc compress v0 req handler = RPCCall $ \conn stream isfc osfc -> do
     let {
         loop v1 decode hdrs = _waitEvent stream >>= \case
@@ -197,7 +201,7 @@ streamRequest
   -- ^ An initial state.
   -> (a -> IO (Compression, a, Either StreamDone (MethodInput s m)))
   -- ^ A state-passing action to retrieve the next message to send to the server.
-  -> RPCCall (a, RawReply (MethodOutput s m))
+  -> RPCCall s m (a, RawReply (MethodOutput s m))
 streamRequest rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl ->
     let ocfc = _outgoingFlowControl conn
         go v1 = do
@@ -245,7 +249,7 @@ singleRequest
   => RPC s m
   -> Compression
   -> MethodInput s m
-  -> RPCCall (RawReply (MethodOutput s m))
+  -> RPCCall s m (RawReply (MethodOutput s m))
 singleRequest rpc compress msg = RPCCall $ \conn stream isfc osfc -> do
     let ocfc = _outgoingFlowControl conn
     sendSingleMessage rpc msg compress setEndStream conn ocfc stream osfc

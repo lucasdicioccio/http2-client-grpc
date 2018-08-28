@@ -148,9 +148,8 @@ streamReply
   -- ^ An initial state.
   -> MethodInput s m
   -- ^ The input.
-  -> (a -> HeaderList -> Either String (MethodOutput s m) -> IO a)
+  -> (a -> HeaderList -> MethodOutput s m -> IO a)
   -- ^ A state-passing handler that is called with the message read.
-  -- TODO: remove the `Either String`
   -> RPCCall (a, HeaderList, HeaderList)
 streamReply rpc compress v0 req handler = RPCCall $ \conn stream isfc osfc -> do
     let {
@@ -177,12 +176,13 @@ streamReply rpc compress v0 req handler = RPCCall $ \conn stream isfc osfc -> do
   where
     handleAllChunks v1 hdrs decode dat exitLoop =
        case pushChunk decode dat of
-           (Done unusedDat _ val) -> do
+           (Done unusedDat _ (Right val)) -> do
                v2 <- handler v1 hdrs val
                handleAllChunks v2 hdrs (decodeOutput rpc compress) unusedDat exitLoop
-           failure@(Fail _ _ err)   -> do
-               _ <- handler v1 hdrs (fromDecoder failure)
-               throwIO (StreamReplyDecodingError err)
+           (Done unusedDat _ (Left err)) -> do
+               throwIO (StreamReplyDecodingError $ "done-error: " ++ err)
+           (Fail _ _ err)                 -> do
+               throwIO (StreamReplyDecodingError $ "fail-error: " ++ err)
            partial@(Partial _)    ->
                exitLoop v1 partial hdrs
 

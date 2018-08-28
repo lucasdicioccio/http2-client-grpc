@@ -140,43 +140,51 @@ open rpc conn authority extraheaders timeout compression doStuff = do
 streamReply
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ServerStreaming)
   => RPC s m
+  -- ^ The RPC to call.
   -> Compression
+  -- ^ The compression to use.
+  -- TODO: revisit compressions.
+  -> a
+  -- ^ An initial state.
   -> MethodInput s m
-  -> (HeaderList -> Either String (MethodOutput s m) -> IO ())
-  -> RPCCall (HeaderList, HeaderList)
-streamReply rpc compress req handler = RPCCall $ \conn stream isfc osfc -> do
+  -- ^ The input.
+  -> (a -> HeaderList -> Either String (MethodOutput s m) -> IO a)
+  -- ^ A state-passing handler that is called with the message read.
+  -- TODO: remove the `Either String`
+  -> RPCCall (a, HeaderList, HeaderList)
+streamReply rpc compress v0 req handler = RPCCall $ \conn stream isfc osfc -> do
     let {
-        loop decode hdrs = _waitEvent stream >>= \case
+        loop v1 decode hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
                 throwIO (InvalidState "push promise")
             (StreamHeadersEvent _ trls) ->
-                return (hdrs, trls)
+                return (v1, hdrs, trls)
             (StreamErrorEvent _ _) ->
                 throwIO (InvalidState "stream error")
             (StreamDataEvent _ dat) -> do
                 _addCredit isfc (ByteString.length dat)
                 _ <- _consumeCredit isfc (ByteString.length dat)
                 _ <- _updateWindow isfc
-                handleAllChunks hdrs decode dat loop
+                handleAllChunks v1 hdrs decode dat loop
     } in do
         let ocfc = _outgoingFlowControl conn
         sendSingleMessage rpc req compress setEndStream conn ocfc stream osfc
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
-                loop (decodeOutput rpc compress) hdrs
+                loop v0 (decodeOutput rpc compress) hdrs
             _                         ->
                 throwIO (InvalidState "no headers")
   where
-    handleAllChunks hdrs decode dat exitLoop =
+    handleAllChunks v1 hdrs decode dat exitLoop =
        case pushChunk decode dat of
            (Done unusedDat _ val) -> do
-               handler hdrs val
-               handleAllChunks hdrs (decodeOutput rpc compress) unusedDat exitLoop
+               v2 <- handler v1 hdrs val
+               handleAllChunks v2 hdrs (decodeOutput rpc compress) unusedDat exitLoop
            failure@(Fail _ _ err)   -> do
-               handler hdrs (fromDecoder failure)
+               _ <- handler v1 hdrs (fromDecoder failure)
                throwIO (StreamReplyDecodingError err)
            partial@(Partial _)    ->
-               exitLoop partial hdrs
+               exitLoop v1 partial hdrs
 
 data StreamDone = StreamDone
 
@@ -184,20 +192,25 @@ data StreamDone = StreamDone
 streamRequest
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ClientStreaming)
   => RPC s m
-  -> (IO (Compression, Either StreamDone (MethodInput s m)))
-  -> RPCCall (RawReply (MethodOutput s m))
-streamRequest rpc handler = RPCCall $ \conn stream isfc streamFlowControl ->
+  -- ^ RPC to call.
+  -> a
+  -- ^ An initial state.
+  -> (a -> IO (Compression, a, Either StreamDone (MethodInput s m)))
+  -- ^ A state-passing action to retrieve the next message to send to the server.
+  -> RPCCall (a, RawReply (MethodOutput s m))
+streamRequest rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl ->
     let ocfc = _outgoingFlowControl conn
-        go = do
-            (compress, nextEvent) <- handler
+        go v1 = do
+            (compress, v2, nextEvent) <- handler v1
             case nextEvent of
                 Right msg -> do
                     sendSingleMessage rpc msg compress id conn ocfc stream streamFlowControl
-                    go
+                    go v2
                 Left _ -> do
                     sendData conn stream setEndStream ""
-                    waitReply rpc compress stream isfc
-    in go
+                    reply <- waitReply rpc compress stream isfc
+                    pure (v2, reply)
+    in go v0
 
 
 -- | Serialize and send a single message.

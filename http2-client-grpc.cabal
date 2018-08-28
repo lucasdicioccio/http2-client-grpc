@@ -16,6 +16,7 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Network.GRPC.Client
+                     , Network.GRPC.Client.Helpers
   build-depends:       base >= 4.7 && < 5
                      , binary
                      , bytestring
@@ -26,6 +27,7 @@ library
                      , proto-lens
                      , proto-lens-protoc
                      , text
+                     , tls
                      , zlib
   default-language:    Haskell2010
 

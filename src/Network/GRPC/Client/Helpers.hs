@@ -102,7 +102,7 @@ rawUnary
   -> MethodInput s m
   -> IO (Either TooMuchConcurrency (RawReply (MethodOutput s m)))
 rawUnary rpc (GrpcClient client authority headers timeout compression) input =
-    let call = singleRequest rpc (Encoding compression) (Decoding compression) input
+    let call = singleRequest rpc input
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
 
 rawStreamServer 
@@ -114,7 +114,7 @@ rawStreamServer
   -> (a -> HeaderList -> MethodOutput s m -> IO a)
   -> IO (Either TooMuchConcurrency (a, HeaderList, HeaderList))
 rawStreamServer rpc (GrpcClient client authority headers timeout compression) v0 input handler =
-    let call = streamReply rpc (Encoding compression) (Decoding compression) v0 input handler
+    let call = streamReply rpc v0 input handler
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
 
 rawStreamClient
@@ -125,5 +125,5 @@ rawStreamClient
   -> (a -> IO (a, Either StreamDone (CompressMode, MethodInput s m)))
   -> IO (Either TooMuchConcurrency (a, (RawReply (MethodOutput s m))))
 rawStreamClient rpc (GrpcClient client authority headers timeout compression) v0 getNext =
-    let call = streamRequest rpc (Encoding compression) (Decoding compression) v0 getNext
+    let call = streamRequest rpc v0 getNext
     in open client authority headers timeout (Encoding compression) (Decoding compression) call

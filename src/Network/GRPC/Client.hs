@@ -97,7 +97,7 @@ instance Exception InvalidState where
 -- | Newtype helper used to uniformize all type of streaming modes when
 -- passing arguments to the 'open' call.
 newtype RPCCall s (m ::Symbol) a = RPCCall {
-    runRPC :: Http2Client -> Http2Stream -> IncomingFlowControl -> OutgoingFlowControl -> IO a
+    runRPC :: Http2Client -> Http2Stream -> IncomingFlowControl -> OutgoingFlowControl -> Encoding -> Decoding -> IO a
   }
 
 -- | Helper to get the proxy object from an RPCCall.
@@ -139,7 +139,7 @@ open conn authority extraheaders timeout encoding decoding call = do
         let
             initStream = headers stream request (setEndHeader)
             handler isfc osfc = do
-                (runRPC call) conn stream isfc osfc
+                (runRPC call) conn stream isfc osfc encoding decoding
         in StreamDefinition initStream handler
 
 -- | gRPC call for Server Streaming.
@@ -147,10 +147,6 @@ streamReply
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ServerStreaming)
   => RPC s m
   -- ^ RPC to call.
-  -> Encoding
-  -- ^ Compression used for encoding.
-  -> Decoding
-  -- ^ Compression allowed for decoding
   -> a
   -- ^ An initial state.
   -> MethodInput s m
@@ -158,7 +154,7 @@ streamReply
   -> (a -> HeaderList -> MethodOutput s m -> IO a)
   -- ^ A state-passing handler that is called with the message read.
   -> RPCCall s m (a, HeaderList, HeaderList)
-streamReply rpc encoding decoding v0 req handler = RPCCall $ \conn stream isfc osfc -> do
+streamReply rpc v0 req handler = RPCCall $ \conn stream isfc osfc encoding decoding -> do
     let {
         loop v1 decode hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
@@ -171,9 +167,10 @@ streamReply rpc encoding decoding v0 req handler = RPCCall $ \conn stream isfc o
                 _addCredit isfc (ByteString.length dat)
                 _ <- _consumeCredit isfc (ByteString.length dat)
                 _ <- _updateWindow isfc
-                handleAllChunks v1 hdrs decode dat loop
+                handleAllChunks decoding v1 hdrs decode dat loop
     } in do
         let ocfc = _outgoingFlowControl conn
+        let decompress = _getDecodingCompression decoding
         sendSingleMessage rpc req encoding setEndStream conn ocfc stream osfc
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
@@ -181,12 +178,12 @@ streamReply rpc encoding decoding v0 req handler = RPCCall $ \conn stream isfc o
             _                         ->
                 throwIO (InvalidState "no headers")
   where
-    decompress = _getDecodingCompression decoding
-    handleAllChunks v1 hdrs decode dat exitLoop =
+    handleAllChunks decoding v1 hdrs decode dat exitLoop =
        case pushChunk decode dat of
            (Done unusedDat _ (Right val)) -> do
                v2 <- handler v1 hdrs val
-               handleAllChunks v2 hdrs (decodeOutput rpc decompress) unusedDat exitLoop
+               let decompress = _getDecodingCompression decoding
+               handleAllChunks decoding v2 hdrs (decodeOutput rpc decompress) unusedDat exitLoop
            (Done unusedDat _ (Left err)) -> do
                throwIO (StreamReplyDecodingError $ "done-error: " ++ err)
            (Fail _ _ err)                 -> do
@@ -203,16 +200,13 @@ streamRequest
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ClientStreaming)
   => RPC s m
   -- ^ RPC to call.
-  -> Encoding
-  -- ^ Compression used for encoding.
-  -> Decoding
-  -- ^ Compression allowed for decoding
   -> a
   -- ^ An initial state.
   -> (a -> IO (a, Either StreamDone (CompressMode, MethodInput s m)))
   -- ^ A state-passing action to retrieve the next message to send to the server.
   -> RPCCall s m (a, RawReply (MethodOutput s m))
-streamRequest rpc encoding decoding v0 handler = RPCCall $ \conn stream isfc streamFlowControl ->
+streamRequest rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl encoding decoding ->
+    let decompress = _getDecodingCompression decoding in
     let ocfc = _outgoingFlowControl conn
         go v1 = do
             (v2, nextEvent) <- handler v1
@@ -228,9 +222,6 @@ streamRequest rpc encoding decoding v0 handler = RPCCall $ \conn stream isfc str
                     reply <- waitReply rpc decoding stream isfc
                     pure (v2, reply)
     in go v0
-  where
-    decompress = _getDecodingCompression decoding
-
 
 -- | Serialize and send a single message.
 sendSingleMessage
@@ -264,14 +255,10 @@ singleRequest
   :: (Service s, HasMethod s m)
   => RPC s m
   -- ^ RPC to call.
-  -> Encoding
-  -- ^ Compression used for encoding.
-  -> Decoding
-  -- ^ Compression allowed for decoding
   -> MethodInput s m
   -- ^ RPC's input.
   -> RPCCall s m (RawReply (MethodOutput s m))
-singleRequest rpc encoding decoding msg = RPCCall $ \conn stream isfc osfc -> do
+singleRequest rpc msg = RPCCall $ \conn stream isfc osfc encoding decoding -> do
     let ocfc = _outgoingFlowControl conn
     sendSingleMessage rpc msg encoding setEndStream conn ocfc stream osfc
     waitReply rpc decoding stream isfc

@@ -18,6 +18,7 @@ module Network.GRPC.Client (
   , singleRequest
   , streamReply
   , streamRequest
+  , CompressMode(..)
   , StreamDone(..)
   -- * Errors.
   , InvalidState(..)
@@ -195,25 +196,31 @@ streamReply rpc encoding decoding v0 req handler = RPCCall $ \conn stream isfc o
 
 data StreamDone = StreamDone
 
+data CompressMode = Compressed | Uncompressed
+
 -- | gRPC call for Client Streaming.
 streamRequest
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ClientStreaming)
   => RPC s m
   -- ^ RPC to call.
+  -> Encoding
+  -- ^ Compression used for encoding.
   -> Decoding
   -- ^ Compression allowed for decoding
   -> a
   -- ^ An initial state.
-  -> (a -> IO (Encoding, a, Either StreamDone (MethodInput s m)))
+  -> (a -> IO (a, Either StreamDone (CompressMode, MethodInput s m)))
   -- ^ A state-passing action to retrieve the next message to send to the server.
   -> RPCCall s m (a, RawReply (MethodOutput s m))
-streamRequest rpc decoding v0 handler = RPCCall $ \conn stream isfc streamFlowControl ->
+streamRequest rpc encoding decoding v0 handler = RPCCall $ \conn stream isfc streamFlowControl ->
     let ocfc = _outgoingFlowControl conn
         go v1 = do
-            (encoding, v2, nextEvent) <- handler v1
-            let compress = _getEncodingCompression encoding
+            (v2, nextEvent) <- handler v1
             case nextEvent of
-                Right msg -> do
+                Right (doCompress, msg) -> do
+                    let compress = case doCompress of
+                            Compressed -> _getEncodingCompression encoding
+                            Uncompressed -> uncompressed
                     sendSingleMessage rpc msg encoding id conn ocfc stream streamFlowControl
                     go v2
                 Left _ -> do

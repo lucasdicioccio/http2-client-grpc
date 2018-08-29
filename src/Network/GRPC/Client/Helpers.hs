@@ -122,8 +122,8 @@ rawStreamClient
   => RPC s m
   -> GrpcClient
   -> a
-  -> (a -> IO (Encoding, a, Either StreamDone (MethodInput s m)))
+  -> (a -> IO (a, Either StreamDone (CompressMode, MethodInput s m)))
   -> IO (Either TooMuchConcurrency (a, (RawReply (MethodOutput s m))))
 rawStreamClient rpc (GrpcClient client authority headers timeout compression) v0 getNext =
-    let call = streamRequest rpc (Decoding compression) v0 getNext
+    let call = streamRequest rpc (Encoding compression) (Decoding compression) v0 getNext
     in open client authority headers timeout (Encoding compression) (Decoding compression) call

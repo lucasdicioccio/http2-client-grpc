@@ -11,14 +11,17 @@ module Network.GRPC.Client.Helpers where
 import Control.Exception (throwIO)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.ByteString.Char8 (ByteString)
+import Data.Default.Class (def)
 import Data.ProtoLens.Service.Types (Service(..), HasMethod, HasMethodImpl(..), StreamingType(..))
 import qualified Network.TLS as TLS
+import qualified Network.TLS.Extra.Cipher as TLS
 import Network.HPACK (HeaderList)
 
 import Network.HTTP2
 import Network.HTTP2.Client
 import Network.GRPC.Client
 import Network.GRPC.HTTP2.Types
+import Network.GRPC.HTTP2.Encoding
 
 -- | A simplified gRPC Client connected via an HTTP2Client to a given server.
 -- Each call from one client will share similar headers, timeout, compression.
@@ -47,7 +50,7 @@ data GrpcClientConfig = GrpcClientConfig {
   -- ^ Timeout for RPCs.
   , _grpcClientConfigCompression     :: !Compression
   -- ^ Compression shared for every call and expected for every answer.
-  , _grpcClientConfigTLS             :: !(Maybe TLS.ClientParams)
+  , _grpcClientConfigTLS             :: !(Maybe ClientParams)
   -- ^ TLS parameters for the session.
   , _grpcClientConfigGoAwayHandler   :: GoAwayHandler
   -- ^ HTTP2 handler for GoAways.
@@ -55,9 +58,26 @@ data GrpcClientConfig = GrpcClientConfig {
   -- ^ HTTP2 handler for unhandled frames.
   }
 
-grpcClientConfigSimple :: HostName -> PortNumber -> GrpcClientConfig
-grpcClientConfigSimple host port =
-    GrpcClientConfig host port [] (Timeout 3000) gzip Nothing throwIO ignoreFallbackHandler
+grpcClientConfigSimple :: HostName -> PortNumber -> UseTlsOrNot -> GrpcClientConfig
+grpcClientConfigSimple host port tls =
+    GrpcClientConfig host port [] (Timeout 3000) gzip (tlsSettings tls host port) throwIO ignoreFallbackHandler
+
+type UseTlsOrNot = Bool
+
+tlsSettings :: UseTlsOrNot -> HostName -> PortNumber -> Maybe ClientParams
+tlsSettings False _ _ = Nothing
+tlsSettings True host port = Just $ TLS.ClientParams {
+          TLS.clientWantSessionResume    = Nothing
+        , TLS.clientUseMaxFragmentLength = Nothing
+        , TLS.clientServerIdentification = (host, ByteString.pack $ show port)
+        , TLS.clientUseServerNameIndication = True
+        , TLS.clientShared               = def
+        , TLS.clientHooks                = def { TLS.onServerCertificate = \_ _ _ _ -> return []
+                                               }
+        , TLS.clientSupported            = def { TLS.supportedCiphers = TLS.ciphersuite_default }
+        , TLS.clientDebug                = def
+         }
+
 
 setupGrpcClient :: GrpcClientConfig -> IO GrpcClient
 setupGrpcClient config = do
@@ -82,8 +102,8 @@ rawUnary
   -> MethodInput s m
   -> IO (Either TooMuchConcurrency (RawReply (MethodOutput s m)))
 rawUnary rpc (GrpcClient client authority headers timeout compression) input =
-    let call = singleRequest rpc compression input
-    in open client authority headers timeout compression call
+    let call = singleRequest rpc (Encoding compression) (Decoding compression) input
+    in open client authority headers timeout (Encoding compression) (Decoding compression) call
 
 rawStreamServer 
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ServerStreaming)
@@ -94,16 +114,16 @@ rawStreamServer
   -> (a -> HeaderList -> MethodOutput s m -> IO a)
   -> IO (Either TooMuchConcurrency (a, HeaderList, HeaderList))
 rawStreamServer rpc (GrpcClient client authority headers timeout compression) v0 input handler =
-    let call = streamReply rpc compression v0 input handler
-    in open client authority headers timeout compression call
+    let call = streamReply rpc (Encoding compression) (Decoding compression) v0 input handler
+    in open client authority headers timeout (Encoding compression) (Decoding compression) call
 
 rawStreamClient
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ClientStreaming)
   => RPC s m
   -> GrpcClient
   -> a
-  -> (a -> IO (Compression, a, Either StreamDone (MethodInput s m)))
+  -> (a -> IO (Encoding, a, Either StreamDone (MethodInput s m)))
   -> IO (Either TooMuchConcurrency (a, (RawReply (MethodOutput s m))))
 rawStreamClient rpc (GrpcClient client authority headers timeout compression) v0 getNext =
-    let call = streamRequest rpc v0 getNext
-    in open client authority headers timeout compression call
+    let call = streamRequest rpc (Decoding compression) v0 getNext
+    in open client authority headers timeout (Encoding compression) (Decoding compression) call

@@ -69,15 +69,16 @@ throwOnPushPromise :: PushPromiseHandler
 throwOnPushPromise _ _ _ _ _ = throwIO UnallowedPushPromiseReceived
 
 -- | Wait for an RPC reply.
-waitReply :: (Service s, HasMethod s m) => RPC s m -> Compression -> Http2Stream -> IncomingFlowControl -> IO (RawReply (MethodOutput s m))
-waitReply rpc compress stream flowControl = do
+waitReply :: (Service s, HasMethod s m) => RPC s m -> Decoding -> Http2Stream -> IncomingFlowControl -> IO (RawReply (MethodOutput s m))
+waitReply rpc decoding stream flowControl = do
     format . fromStreamResult <$> waitStream stream flowControl throwOnPushPromise
   where
+    decompress = _getDecodingCompression decoding
     format rsp = do
        (hdrs, dat, trls) <- rsp
        let res =
              case lookup grpcMessageH hdrs of
-               Nothing     -> fromDecoder $ pushEndOfInput $ flip pushChunk dat $ decodeOutput rpc compress
+               Nothing     -> fromDecoder $ pushEndOfInput $ flip pushChunk dat $ decodeOutput rpc decompress
                Just errMsg -> Left $ unpack errMsg
 
        return (hdrs, trls, res)
@@ -112,24 +113,24 @@ open :: (Service s, HasMethod s m)
      -- ^ A set of HTTP2 headers (e.g., for adding authentication headers).
      -> Timeout
      -- ^ Timeout in seconds.
-     -> Compression
-     -- ^ An indication of the compression that you will be using and accepting.  Compression
-     -- should be per message, however a bug in gRPC-Go (to be confirmed) seems
-     -- to turn message compression mandatory if advertised in the HTTP2
-     -- headers, even though the specification states that compression per
-     -- message is optional irrespectively of headers.
+     -> Encoding
+     -- ^ Compression used for encoding.
+     -> Decoding
+     -- ^ Compression allowed for decoding
      -> RPCCall s m a
      -- ^ The actual RPC handler.
      -> IO (Either TooMuchConcurrency a)
-open conn authority extraheaders timeout compression call = do
+open conn authority extraheaders timeout encoding decoding call = do
     let rpc = rpcFromCall call
+    let compress = _getEncodingCompression encoding
+    let decompress = _getDecodingCompression decoding
     let request = [ (":method", "POST")
                   , (":scheme", "http")
                   , (":authority", authority)
                   , (":path", path rpc) 
                   , (grpcTimeoutH, showTimeout timeout)
-                  , (grpcEncodingH, grpcCompressionHV compression)
-                  , (grpcAcceptEncodingH, mconcat [grpcAcceptEncodingHVdefault, ",", grpcCompressionHV compression])
+                  , (grpcEncodingH, grpcCompressionHV compress)
+                  , (grpcAcceptEncodingH, mconcat [grpcAcceptEncodingHVdefault, ",", grpcCompressionHV decompress])
                   , ("content-type", grpcContentTypeHV)
                   , ("te", "trailers")
                   ] <> extraheaders
@@ -144,10 +145,11 @@ open conn authority extraheaders timeout compression call = do
 streamReply
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ServerStreaming)
   => RPC s m
-  -- ^ The RPC to call.
-  -> Compression
-  -- ^ The compression to use.
-  -- TODO: revisit compressions.
+  -- ^ RPC to call.
+  -> Encoding
+  -- ^ Compression used for encoding.
+  -> Decoding
+  -- ^ Compression allowed for decoding
   -> a
   -- ^ An initial state.
   -> MethodInput s m
@@ -155,7 +157,7 @@ streamReply
   -> (a -> HeaderList -> MethodOutput s m -> IO a)
   -- ^ A state-passing handler that is called with the message read.
   -> RPCCall s m (a, HeaderList, HeaderList)
-streamReply rpc compress v0 req handler = RPCCall $ \conn stream isfc osfc -> do
+streamReply rpc encoding decoding v0 req handler = RPCCall $ \conn stream isfc osfc -> do
     let {
         loop v1 decode hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
@@ -171,18 +173,19 @@ streamReply rpc compress v0 req handler = RPCCall $ \conn stream isfc osfc -> do
                 handleAllChunks v1 hdrs decode dat loop
     } in do
         let ocfc = _outgoingFlowControl conn
-        sendSingleMessage rpc req compress setEndStream conn ocfc stream osfc
+        sendSingleMessage rpc req encoding setEndStream conn ocfc stream osfc
         _waitEvent stream >>= \case
             StreamHeadersEvent _ hdrs ->
-                loop v0 (decodeOutput rpc compress) hdrs
+                loop v0 (decodeOutput rpc decompress) hdrs
             _                         ->
                 throwIO (InvalidState "no headers")
   where
+    decompress = _getDecodingCompression decoding
     handleAllChunks v1 hdrs decode dat exitLoop =
        case pushChunk decode dat of
            (Done unusedDat _ (Right val)) -> do
                v2 <- handler v1 hdrs val
-               handleAllChunks v2 hdrs (decodeOutput rpc compress) unusedDat exitLoop
+               handleAllChunks v2 hdrs (decodeOutput rpc decompress) unusedDat exitLoop
            (Done unusedDat _ (Left err)) -> do
                throwIO (StreamReplyDecodingError $ "done-error: " ++ err)
            (Fail _ _ err)                 -> do
@@ -197,24 +200,29 @@ streamRequest
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ClientStreaming)
   => RPC s m
   -- ^ RPC to call.
+  -> Decoding
+  -- ^ Compression allowed for decoding
   -> a
   -- ^ An initial state.
-  -> (a -> IO (Compression, a, Either StreamDone (MethodInput s m)))
+  -> (a -> IO (Encoding, a, Either StreamDone (MethodInput s m)))
   -- ^ A state-passing action to retrieve the next message to send to the server.
   -> RPCCall s m (a, RawReply (MethodOutput s m))
-streamRequest rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl ->
+streamRequest rpc decoding v0 handler = RPCCall $ \conn stream isfc streamFlowControl ->
     let ocfc = _outgoingFlowControl conn
         go v1 = do
-            (compress, v2, nextEvent) <- handler v1
+            (encoding, v2, nextEvent) <- handler v1
+            let compress = _getEncodingCompression encoding
             case nextEvent of
                 Right msg -> do
-                    sendSingleMessage rpc msg compress id conn ocfc stream streamFlowControl
+                    sendSingleMessage rpc msg encoding id conn ocfc stream streamFlowControl
                     go v2
                 Left _ -> do
                     sendData conn stream setEndStream ""
-                    reply <- waitReply rpc compress stream isfc
+                    reply <- waitReply rpc decoding stream isfc
                     pure (v2, reply)
     in go v0
+  where
+    decompress = _getDecodingCompression decoding
 
 
 -- | Serialize and send a single message.
@@ -222,14 +230,15 @@ sendSingleMessage
   :: (Service s, HasMethod s m)
   => RPC s m
   -> MethodInput s m
-  -> Compression
+  -> Encoding
   -> FlagSetter
   -> Http2Client
   -> OutgoingFlowControl
   -> Http2Stream
   -> OutgoingFlowControl
   -> IO ()
-sendSingleMessage rpc msg compression flagMod conn connectionFlowControl stream streamFlowControl = do
+sendSingleMessage rpc msg encoding flagMod conn connectionFlowControl stream streamFlowControl = do
+    let compress = _getEncodingCompression encoding
     let goUpload dat = do
             let !wanted = ByteString.length dat
             gotStream <- _withdrawCredit streamFlowControl wanted
@@ -241,16 +250,21 @@ sendSingleMessage rpc msg compression flagMod conn connectionFlowControl stream 
             else do
                 sendData conn stream id (ByteString.take got dat)
                 goUpload (ByteString.drop got dat)
-    goUpload . toStrict . toLazyByteString . encodeInput rpc compression $ msg
+    goUpload . toStrict . toLazyByteString . encodeInput rpc compress $ msg
 
 -- | gRPC call for an unary request.
 singleRequest
   :: (Service s, HasMethod s m)
   => RPC s m
-  -> Compression
+  -- ^ RPC to call.
+  -> Encoding
+  -- ^ Compression used for encoding.
+  -> Decoding
+  -- ^ Compression allowed for decoding
   -> MethodInput s m
+  -- ^ RPC's input.
   -> RPCCall s m (RawReply (MethodOutput s m))
-singleRequest rpc compress msg = RPCCall $ \conn stream isfc osfc -> do
+singleRequest rpc encoding decoding msg = RPCCall $ \conn stream isfc osfc -> do
     let ocfc = _outgoingFlowControl conn
-    sendSingleMessage rpc msg compress setEndStream conn ocfc stream osfc
-    waitReply rpc compress stream isfc
+    sendSingleMessage rpc msg encoding setEndStream conn ocfc stream osfc
+    waitReply rpc decoding stream isfc

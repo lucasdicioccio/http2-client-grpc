@@ -184,7 +184,7 @@ streamReply rpc v0 req handler = RPCCall $ \conn stream isfc osfc encoding decod
                v2 <- handler v1 hdrs val
                let decompress = _getDecodingCompression decoding
                handleAllChunks decoding v2 hdrs (decodeOutput rpc decompress) unusedDat exitLoop
-           (Done unusedDat _ (Left err)) -> do
+           (Done _ _ (Left err)) -> do
                throwIO (StreamReplyDecodingError $ "done-error: " ++ err)
            (Fail _ _ err)                 -> do
                throwIO (StreamReplyDecodingError $ "fail-error: " ++ err)
@@ -206,7 +206,6 @@ streamRequest
   -- ^ A state-passing action to retrieve the next message to send to the server.
   -> RPCCall s m (a, RawReply (MethodOutput s m))
 streamRequest rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl encoding decoding ->
-    let decompress = _getDecodingCompression decoding in
     let ocfc = _outgoingFlowControl conn
         go v1 = do
             (v2, nextEvent) <- handler v1
@@ -215,7 +214,7 @@ streamRequest rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl enc
                     let compress = case doCompress of
                             Compressed -> _getEncodingCompression encoding
                             Uncompressed -> uncompressed
-                    sendSingleMessage rpc msg encoding id conn ocfc stream streamFlowControl
+                    sendSingleMessage rpc msg (Encoding compress) id conn ocfc stream streamFlowControl
                     go v2
                 Left _ -> do
                     sendData conn stream setEndStream ""

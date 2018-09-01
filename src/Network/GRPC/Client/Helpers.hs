@@ -5,7 +5,12 @@
 -- | Set of helpers helping with writing gRPC clients with not much exposure of
 -- the http2-client complexity.
 --
--- Th
+-- The GrpcClient handles automatic background connection-level window updates
+-- to prevent the connection from starving and pings to force a connection
+-- alive.
+--
+-- There is no automatic reconnection, retry, or healthchecking. These features
+-- are not planned in this library and should be added at higher-levels.
 module Network.GRPC.Client.Helpers where
 
 import Control.Concurrent.Async (Async, async)

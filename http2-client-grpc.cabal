@@ -21,10 +21,11 @@ library
                      , async
                      , binary
                      , bytestring
+                     , case-insensitive
                      , data-default-class
                      , http2
                      , http2-client
-                     , http2-grpc-types >= 0.2
+                     , http2-grpc-types >= 0.3
                      , proto-lens
                      , proto-lens-protoc
                      , text

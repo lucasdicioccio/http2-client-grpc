@@ -31,12 +31,14 @@ module Network.GRPC.Client (
   ) where
 
 import Control.Exception (Exception(..), throwIO)
-import Data.Monoid ((<>))
 import Data.ByteString.Char8 (unpack)
 import Data.ByteString.Lazy (toStrict)
 import Data.Binary.Builder (toLazyByteString)
 import Data.Binary.Get (Decoder(..), pushChunk, pushEndOfInput)
 import qualified Data.ByteString.Char8 as ByteString
+import Data.CaseInsensitive (CI)
+import qualified Data.CaseInsensitive as CI
+import Data.Monoid ((<>))
 import Data.ProtoLens.Service.Types (Service(..), HasMethod, HasMethodImpl(..), StreamingType(..))
 import GHC.TypeLits (Symbol)
 
@@ -46,6 +48,8 @@ import Network.HTTP2
 import Network.HPACK
 import Network.HTTP2.Client
 import Network.HTTP2.Client.Helpers
+
+type CIHeaderList = [(CI ByteString.ByteString, ByteString.ByteString)]
 
 -- | A reply.
 --
@@ -57,7 +61,7 @@ import Network.HTTP2.Client.Helpers
 -- - 1st item: initial HTTP2 response
 -- - 2nd item: second (trailers) HTTP2 response
 -- - 3rd item: proper gRPC answer
-type RawReply a = Either ErrorCode (HeaderList, Maybe HeaderList, (Either String a))
+type RawReply a = Either ErrorCode (CIHeaderList, Maybe CIHeaderList, (Either String a))
 
 -- | gRPC disables HTTP2 push-promises.
 --
@@ -77,12 +81,19 @@ waitReply rpc decoding stream flowControl = do
     decompress = _getDecodingCompression decoding
     format rsp = do
        (hdrs, dat, trls) <- rsp
+       let hdrs2 = headerstoCIHeaders hdrs
+       let trls2 = fmap headerstoCIHeaders trls
        let res =
-             case lookup grpcMessageH hdrs of
+             -- presence of a message indicate an error
+             -- TODO: double check this is true in general
+             case lookup grpcMessageH hdrs2 of
                Nothing     -> fromDecoder $ pushEndOfInput $ flip pushChunk dat $ decodeOutput rpc decompress
                Just errMsg -> Left $ unpack errMsg
 
-       return (hdrs, trls, res)
+       return (hdrs2, trls2, res)
+
+headerstoCIHeaders :: HeaderList -> CIHeaderList
+headerstoCIHeaders hdrs = [(CI.mk k, v) | (k,v) <- hdrs]
 
 -- | Exception raised when a ServerStreaming RPC results in a decoding
 -- error.
@@ -129,9 +140,9 @@ open conn authority extraheaders timeout encoding decoding call = do
                   , (":scheme", "http")
                   , (":authority", authority)
                   , (":path", path rpc) 
-                  , (grpcTimeoutH, showTimeout timeout)
-                  , (grpcEncodingH, grpcCompressionHV compress)
-                  , (grpcAcceptEncodingH, mconcat [grpcAcceptEncodingHVdefault, ",", grpcCompressionHV decompress])
+                  , (CI.original grpcTimeoutH, showTimeout timeout)
+                  , (CI.original grpcEncodingH, grpcCompressionHV compress)
+                  , (CI.original grpcAcceptEncodingH, mconcat [grpcAcceptEncodingHVdefault, ",", grpcCompressionHV decompress])
                   , ("content-type", grpcContentTypeHV)
                   , ("te", "trailers")
                   ] <> extraheaders

@@ -25,12 +25,10 @@ import qualified Network.TLS as TLS
 import qualified Network.TLS.Extra.Cipher as TLS
 import Network.HPACK (HeaderList)
 
-import Network.HTTP2
-import Network.HTTP2.Client
+import Network.HTTP2.Client (newHttp2FrameConnection, newHttp2Client, Http2Client(..), IncomingFlowControl(..), GoAwayHandler, FallBackFrameHandler, ignoreFallbackHandler, HostName, PortNumber, TooMuchConcurrency)
 import Network.HTTP2.Client.Helpers (ping)
-import Network.GRPC.Client
-import Network.GRPC.HTTP2.Types
-import Network.GRPC.HTTP2.Encoding
+import Network.GRPC.Client (RPC, open, singleRequest, streamReply, streamRequest, Authority, Timeout(..), StreamDone, CompressMode, RawReply)
+import Network.GRPC.HTTP2.Encoding (Compression, Encoding(..), Decoding(..), gzip)
 
 -- | A simplified gRPC Client connected via an HTTP2Client to a given server.
 -- Each call from one client will share similar headers, timeout, compression.
@@ -68,7 +66,7 @@ data GrpcClientConfig = GrpcClientConfig {
   -- ^ Timeout for RPCs.
   , _grpcClientConfigCompression     :: !Compression
   -- ^ Compression shared for every call and expected for every answer.
-  , _grpcClientConfigTLS             :: !(Maybe ClientParams)
+  , _grpcClientConfigTLS             :: !(Maybe TLS.ClientParams)
   -- ^ TLS parameters for the session.
   , _grpcClientConfigGoAwayHandler   :: GoAwayHandler
   -- ^ HTTP2 handler for GoAways.
@@ -86,7 +84,7 @@ grpcClientConfigSimple host port tls =
 
 type UseTlsOrNot = Bool
 
-tlsSettings :: UseTlsOrNot -> HostName -> PortNumber -> Maybe ClientParams
+tlsSettings :: UseTlsOrNot -> HostName -> PortNumber -> Maybe TLS.ClientParams
 tlsSettings False _ _ = Nothing
 tlsSettings True host port = Just $ TLS.ClientParams {
           TLS.clientWantSessionResume    = Nothing

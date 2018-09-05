@@ -129,34 +129,53 @@ close grpc = do
     cancel $ backgroundWindowUpdate $ _grpcClientBackground grpc
     _close $ _grpcClientHttp2Client grpc
 
+-- | Run an unary query.
 rawUnary
   :: (Service s, HasMethod s m)
   => RPC s m
+  -- ^ The RPC to call.
   -> GrpcClient
+  -- ^ An initialized client.
   -> MethodInput s m
+  -- ^ The input.
   -> IO (Either TooMuchConcurrency (RawReply (MethodOutput s m)))
 rawUnary rpc (GrpcClient client authority headers timeout compression _) input =
     let call = singleRequest rpc input
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
 
+-- | Calls for a server stream of requests.
 rawStreamServer 
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ServerStreaming)
   => RPC s m
+  -- ^ The RPC to call.
   -> GrpcClient
+  -- ^ An initialized client.
   -> a
+  -- ^ An initial state.
   -> MethodInput s m
+  -- ^ The input of the stream request.
   -> (a -> HeaderList -> MethodOutput s m -> IO a)
+  -- ^ A state-passing handler called for each server-sent output.
+  -- Headers are repeated for convenience but are the same for every iteration.
   -> IO (Either TooMuchConcurrency (a, HeaderList, HeaderList))
 rawStreamServer rpc (GrpcClient client authority headers timeout compression _) v0 input handler =
     let call = streamReply rpc v0 input handler
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
 
+-- | Sends a streams of requests to the server.
+--
+-- Messages are submitted to the HTTP2 underlying client and hence this
+-- function can block until the HTTP2 client has some network credit.
 rawStreamClient
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ClientStreaming)
   => RPC s m
+  -- ^ The RPC to call.
   -> GrpcClient
+  -- ^ An initialized client.
   -> a
+  -- ^ An initial state.
   -> (a -> IO (a, Either StreamDone (CompressMode, MethodInput s m)))
+  -- ^ A state-passing step function to decide the next message.
   -> IO (Either TooMuchConcurrency (a, (RawReply (MethodOutput s m))))
 rawStreamClient rpc (GrpcClient client authority headers timeout compression _) v0 getNext =
     let call = streamRequest rpc v0 getNext

@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds         #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs             #-}
+{-# LANGUAGE FlexibleContexts  #-}
 
 -- | Set of helpers helping with writing gRPC clients with not much exposure of
 -- the http2-client complexity.
@@ -13,6 +14,7 @@
 -- are not planned in this library and should be added at higher-levels.
 module Network.GRPC.Client.Helpers where
 
+import Control.Lens
 import Control.Concurrent.Async (Async, async, cancel)
 import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
@@ -142,6 +144,17 @@ rawUnary
 rawUnary rpc (GrpcClient client authority headers timeout compression _) input =
     let call = singleRequest rpc input
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
+
+-- | Prism helper to unpack an unary gRPC call output.
+--
+-- @ out <- rawUnary rpc grpc method
+--   print $ out ^? unaryOutput . somefield
+-- @
+unaryOutput
+  :: (Applicative f, Field3 a1 b1 (Either c1 a2) (Either c1 b2)) =>
+     (a2 -> f b2)
+     -> Either c2 (Either c3 a1) -> f (Either c2 (Either c3 b1))
+unaryOutput = _Right . _Right . _3 . _Right
 
 -- | Calls for a server stream of requests.
 rawStreamServer 

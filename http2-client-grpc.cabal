@@ -23,6 +23,7 @@ library
                      , bytestring
                      , case-insensitive
                      , data-default-class
+                     , lens
                      , http2
                      , http2-client
                      , http2-grpc-types >= 0.3

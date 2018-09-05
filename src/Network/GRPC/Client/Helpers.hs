@@ -13,7 +13,7 @@
 -- are not planned in this library and should be added at higher-levels.
 module Network.GRPC.Client.Helpers where
 
-import Control.Concurrent.Async (Async, async)
+import Control.Concurrent.Async (Async, async, cancel)
 import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
 import Control.Monad (forever)
@@ -121,6 +121,13 @@ setupGrpcClient config = do
       ping cli 3000000 "grpc.hs"
   let tasks = BackgroundTasks wuAsync pingAsync
   return $ GrpcClient cli authority headers timeout compression tasks
+
+-- | Cancels background tasks and closes the underlying HTTP2 client.
+close :: GrpcClient -> IO ()
+close grpc = do
+    cancel $ backgroundPing $ _grpcClientBackground grpc
+    cancel $ backgroundWindowUpdate $ _grpcClientBackground grpc
+    _close $ _grpcClientHttp2Client grpc
 
 rawUnary
   :: (Service s, HasMethod s m)

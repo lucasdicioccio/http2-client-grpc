@@ -7,6 +7,36 @@
 {-# LANGUAGE TypeFamilies        #-}
 
 -- | A module adding support for gRPC over HTTP2.
+--
+-- This module provides helpers to encode gRPC queries on top of HTTP2 client.
+--
+-- The helpers we provide for streaming RPCs ('streamReply', 'streamRequest',
+-- 'steppedBiDiStream') are a subset of what gRPC allows: the gRPC definition
+-- of streaming RPCs offers a large amount of valid behaviors regarding timing
+-- of headers, trailers, and end of streams.
+--
+-- The limitations of these functions should be clear from the type signatures.
+-- But in general, the design is to only allow synchronous state machines. Such
+-- state-machines cannot immediately react to server-sent messages but must
+-- wait for the client code to poll for some server-sent information.  In
+-- short, these handlers prevents programs from observing intermediary steps
+-- which may be valid applications by gRPC standards. Simply put, it is not
+-- possibly to simultaneously wait for some information from the server and
+-- send some information.
+-- For instance, in a client-streaming RPC, the server is allowed to send
+-- trailers at any time, even before receiving any input message. The
+-- 'streamRequest' functions disallows reading trailers until the client code
+-- is done sending requests.
+-- A result from this design choice is to offer a simple programming surface
+-- for the most common use cases. Further, these simple state-machines require
+-- little runtime overhead.
+--
+-- A more general handler will be provided in the future. Though, for now
+-- someone has to write its own 'RPC' function. Writing one's own 'RPC'
+-- function allows to leverage the specific semantics of the RPC call to save
+-- some overhead (much like the three above streaming helpers assume a simple
+-- behavior from the server). Hence, it is generally a good idea to take
+-- inspiration from the existing RPC functions and learn how to write one.
 module Network.GRPC.Client (
   -- * Building blocks.
     RPC(..)
@@ -18,16 +48,24 @@ module Network.GRPC.Client (
   , singleRequest
   , streamReply
   , streamRequest
+  , steppedBiDiStream
   , CompressMode(..)
   , StreamDone(..)
+  , BiDiStep(..)
+  , RunBiDiStep(..)
+  , HandleMessageStep
+  , HandleTrailersStep
   -- * Errors.
   , InvalidState(..)
   , StreamReplyDecodingError(..)
   , UnallowedPushPromiseReceived(..)
+  , InvalidParse(..)
   -- * Compression of individual messages.
   , Compression
   , gzip
   , uncompressed
+  -- * Re-exports.
+  , HeaderList
   ) where
 
 import Control.Exception (Exception(..), throwIO)
@@ -36,9 +74,11 @@ import Data.ByteString.Lazy (toStrict)
 import Data.Binary.Builder (toLazyByteString)
 import Data.Binary.Get (Decoder(..), pushChunk, pushEndOfInput)
 import qualified Data.ByteString.Char8 as ByteString
+import Data.ByteString.Char8 (ByteString)
 import Data.CaseInsensitive (CI)
 import qualified Data.CaseInsensitive as CI
 import Data.Monoid ((<>))
+import Data.ProtoLens.Message (Message)
 import Data.ProtoLens.Service.Types (Service(..), HasMethod, HasMethodImpl(..), StreamingType(..))
 import GHC.TypeLits (Symbol)
 
@@ -49,7 +89,7 @@ import Network.HPACK
 import Network.HTTP2.Client
 import Network.HTTP2.Client.Helpers
 
-type CIHeaderList = [(CI ByteString.ByteString, ByteString.ByteString)]
+type CIHeaderList = [(CI ByteString, ByteString)]
 
 -- | A reply.
 --
@@ -169,7 +209,7 @@ streamReply rpc v0 req handler = RPCCall $ \conn stream isfc osfc encoding decod
     let {
         loop v1 decode hdrs = _waitEvent stream >>= \case
             (StreamPushPromiseEvent _ _ _) ->
-                throwIO (InvalidState "push promise")
+                throwIO UnallowedPushPromiseReceived
             (StreamHeadersEvent _ trls) ->
                 return (v1, hdrs, trls)
             (StreamErrorEvent _ _) ->
@@ -272,3 +312,86 @@ singleRequest rpc msg = RPCCall $ \conn stream isfc osfc encoding decoding -> do
     let ocfc = _outgoingFlowControl conn
     sendSingleMessage rpc msg encoding setEndStream conn ocfc stream osfc
     waitReply rpc decoding stream isfc
+
+-- | Handler for received message.
+type HandleMessageStep s m a = HeaderList -> a -> MethodOutput s m -> IO a
+-- | Handler for received trailers.
+type HandleTrailersStep a = HeaderList -> a -> HeaderList -> IO a
+
+data BiDiStep s m a =
+    Abort
+  -- ^ Finalize and return the current state.
+  | SendInput !CompressMode !(MethodInput s m)
+  -- ^ Sends a single message.
+  | WaitOutput (HandleMessageStep s m a) (HandleTrailersStep a)
+  -- ^ Wait for information from the server, handlers can modify the state.
+
+-- | State-based function.
+type RunBiDiStep s m a = a -> IO (a, BiDiStep s m a)
+
+-- | gRPC call for a stepped bidirectional stream.
+--
+-- This helper limited.
+--
+-- See 'BiDiStep' and 'RunBiDiStep' to understand the type of programs one can
+-- write with this function.
+steppedBiDiStream
+  :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'BiDiStreaming)
+  => RPC s m
+  -- ^ RPC to call.
+  -> a
+  -- ^ An initial state.
+  -> RunBiDiStep s m a
+  -- ^ The program.
+  -> RPCCall s m a
+steppedBiDiStream rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl encoding decoding ->
+    let ocfc = _outgoingFlowControl conn
+        decompress = _getDecodingCompression decoding
+        newDecoder = decodeOutput rpc decompress
+
+        goStep _ _ (v1, Abort) = do
+            sendData conn stream setEndStream ""
+            pure v1
+        goStep hdrs decode (v1, SendInput doCompress msg) = do
+            let compress = case doCompress of
+                    Compressed -> _getEncodingCompression encoding
+                    Uncompressed -> uncompressed
+            sendSingleMessage rpc msg (Encoding compress) id conn ocfc stream streamFlowControl
+            handler v1 >>= goStep hdrs decode
+        goStep jhdrs@(Just hdrs) decode unchanged@(v1, WaitOutput handleMsg handleEof) = do
+            _waitEvent stream >>= \case
+                (StreamPushPromiseEvent _ _ _) ->
+                    throwIO UnallowedPushPromiseReceived
+                (StreamHeadersEvent _ trls) -> do
+                    v2 <- handleEof hdrs v1 trls
+                    -- TODO: consider failing the decoder here
+                    handler v2 >>= goStep jhdrs newDecoder
+                (StreamErrorEvent _ _) ->
+                    throwIO (InvalidState "stream error")
+                (StreamDataEvent _ dat) -> do
+                    _addCredit isfc (ByteString.length dat)
+                    _ <- _consumeCredit isfc (ByteString.length dat)
+                    _ <- _updateWindow isfc
+                    case pushChunk decode dat of
+                        (Done unusedDat _ (Right val)) -> do
+                            v2 <- handleMsg hdrs v1 val
+                            handler v2 >>= goStep jhdrs newDecoder
+                        (Done _ _ (Left err)) -> do
+                            throwIO $ InvalidParse $ "done-err: " ++ err
+                        (Fail _ _ err)         ->
+                            throwIO $ InvalidParse $ "done-fail: " ++ err
+                        partial@(Partial _)    -> do
+                            goStep jhdrs partial unchanged
+        goStep Nothing decode unchanged = do
+            _waitEvent stream >>= \case
+                (StreamHeadersEvent _ hdrs) ->
+                   goStep (Just hdrs) decode unchanged
+                _ ->
+                   throwIO (InvalidState "no headers")
+
+    in handler v0 >>= goStep Nothing newDecoder
+
+-- | Exception raised when a BiDiStreaming RPC results in an invalid
+-- parse.
+data InvalidParse = InvalidParse String deriving Show
+instance Exception InvalidParse where

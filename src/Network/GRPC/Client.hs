@@ -31,8 +31,16 @@
 -- for the most common use cases. Further, these simple state-machines require
 -- little runtime overhead.
 --
--- A more general handler will be provided in the future. Though, for now
--- someone has to write its own 'RPC' function. Writing one's own 'RPC'
+-- A more general handler 'generalHandler' is provided which runs two thread in
+-- parallel. This handler allows to send an receive messages concurrently using
+-- one loop each, which allows to circumvent the limitations of the above
+-- handlers (but at a cost: complexity and threading overhead). It also means
+-- that a sending action may be stuck indefinitely on flow-control and cannot
+-- be cancelled without killing the 'RPC' thread. You see where we are going:
+-- the more elaborate the semantics, the more a programmer has to think.
+--
+-- Though, all hope of expressing wacky application semantics is not lost: it
+-- is always possible to write its own 'RPC' function.  Writing one's own 'RPC'
 -- function allows to leverage the specific semantics of the RPC call to save
 -- some overhead (much like the three above streaming helpers assume a simple
 -- behavior from the server). Hence, it is generally a good idea to take
@@ -49,12 +57,15 @@ module Network.GRPC.Client (
   , streamReply
   , streamRequest
   , steppedBiDiStream
+  , generalHandler
   , CompressMode(..)
   , StreamDone(..)
   , BiDiStep(..)
   , RunBiDiStep(..)
   , HandleMessageStep
   , HandleTrailersStep
+  , IncomingEvent(..)
+  , OutgoingEvent(..)
   -- * Errors.
   , InvalidState(..)
   , StreamReplyDecodingError(..)
@@ -68,7 +79,8 @@ module Network.GRPC.Client (
   , HeaderList
   ) where
 
-import Control.Exception (Exception(..), throwIO)
+import Control.Concurrent.Async (concurrently)
+import Control.Exception (SomeException, Exception(..), throwIO)
 import Data.ByteString.Char8 (unpack)
 import Data.ByteString.Lazy (toStrict)
 import Data.Binary.Builder (toLazyByteString)
@@ -142,7 +154,8 @@ instance Exception StreamReplyDecodingError where
 
 -- | Exception raised when a ServerStreaming RPC results in an invalid
 -- state machine.
-data InvalidState = InvalidState String deriving Show
+data InvalidState = InvalidState String
+  deriving Show
 instance Exception InvalidState where
 
 -- | Newtype helper used to uniformize all type of streaming modes when
@@ -375,7 +388,7 @@ steppedBiDiStream rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl
                     case pushChunk decode dat of
                         (Done unusedDat _ (Right val)) -> do
                             v2 <- handleMsg hdrs v1 val
-                            handler v2 >>= goStep jhdrs newDecoder
+                            handler v2 >>= goStep jhdrs (pushChunk newDecoder unusedDat)
                         (Done _ _ (Left err)) -> do
                             throwIO $ InvalidParse $ "done-err: " ++ err
                         (Fail _ _ err)         ->
@@ -395,3 +408,96 @@ steppedBiDiStream rpc v0 handler = RPCCall $ \conn stream isfc streamFlowControl
 -- parse.
 data InvalidParse = InvalidParse String deriving Show
 instance Exception InvalidParse where
+
+-- | An event for the incoming loop of 'generalHandler'.
+data IncomingEvent s m a =
+    Headers HeaderList
+  -- ^ The server sent some initial metadata with the headers.
+  | RecvMessage (MethodOutput s m)
+  -- ^ The server send a message.
+  | Trailers HeaderList
+  -- ^ The server send final metadata (the loop stops).
+  | Invalid SomeException
+  -- ^ Something went wrong (the loop stops).
+
+-- | An event for the outgoing loop of 'generalHandler'.
+data OutgoingEvent s m b =
+    Finalize
+  -- ^ The client is done with the RPC (the loop stops).
+  | SendMessage CompressMode (MethodInput s m)
+  -- ^ The client sends a message to the server.
+
+-- | General RPC handler for decorrelating the handling of received
+-- headers/trailers from the sending of messages.
+--
+-- There is no constraints on the stream-arity of the RPC. It requires a bit of
+-- viligence to avoid breaking the gRPC semantics but this one is easy to pay
+-- attention to.
+--
+-- This handler runs two loops 'concurrently':
+-- One loop accepts and chunks messages from the HTTP2 stream, then return events
+-- and stops on Trailers or Invalid. The other loop waits for messages to send to
+-- the server or finalize and returns.
+generalHandler 
+  :: (Service s, HasMethod s m)
+  => RPC s m
+  -- ^ RPC to call.
+  -> a
+  -- ^ An initial state for the incoming loop.
+  -> (a -> IncomingEvent s m a -> IO a)
+  -- ^ A state-passing function for the incoming loop.
+  -> b
+  -- ^ An initial state for the outgoing loop.
+  -> (b -> IO (b, OutgoingEvent s m b))
+  -- ^ A state-passing function for the outgoing loop.
+  -> RPCCall s m (a,b)
+generalHandler rpc v0 handle w0 next = RPCCall $ \conn stream isfc osfc encoding decoding ->
+    go conn stream isfc osfc encoding decoding
+  where
+    go conn stream isfc osfc encoding decoding =
+        concurrently (incomingLoop Nothing newDecoder v0) (outGoingLoop w0)
+      where
+        ocfc = _outgoingFlowControl conn
+        newDecoder = decodeOutput rpc decompress
+        decompress = _getDecodingCompression decoding
+        outGoingLoop v1 = do
+             (v2, event) <- next v1
+             case event of
+                 Finalize -> do
+                    sendData conn stream setEndStream ""
+                    return v2
+                 SendMessage doCompress msg -> do
+                    let compress = case doCompress of
+                            Compressed -> _getEncodingCompression encoding
+                            Uncompressed -> uncompressed
+                    sendSingleMessage rpc msg (Encoding compress) id conn ocfc stream osfc
+                    outGoingLoop v2
+        incomingLoop Nothing decode v1 =
+                _waitEvent stream >>= \case
+                    (StreamHeadersEvent _ hdrs) ->
+                       handle v1 (Headers hdrs) >>= incomingLoop (Just hdrs) decode
+                    _ ->
+                       handle v1 (Invalid $ toException $ InvalidState "no headers")
+        incomingLoop jhdrs decode v1 =
+            _waitEvent stream >>= \case
+                (StreamHeadersEvent _ hdrs) ->
+                    handle v1 (Trailers hdrs)
+                (StreamDataEvent _ dat) -> do
+                    _addCredit isfc (ByteString.length dat)
+                    _ <- _consumeCredit isfc (ByteString.length dat)
+                    _ <- _updateWindow isfc
+                    case pushChunk decode dat of
+                        (Done unusedDat _ (Right val)) ->
+                            handle v1 (RecvMessage val) >>= incomingLoop jhdrs (pushChunk newDecoder unusedDat)
+                        partial@(Partial _)    -> do
+                            incomingLoop jhdrs partial v1
+                        (Done _ _ (Left err)) -> do
+                            handle v1 (Invalid $ toException $ InvalidParse $ "invalid-done-parse: " ++ err)
+                        (Fail _ _ err)         ->
+                            handle v1 (Invalid $ toException $ InvalidParse $ "invalid-parse: " ++ err)
+                (StreamPushPromiseEvent _ _ _) ->
+                    handle v1 (Invalid $ toException UnallowedPushPromiseReceived)
+                (StreamErrorEvent _ _) ->
+                    handle v1 (Invalid $ toException $ InvalidState "stream error")
+                _ ->
+                    handle v1 (Invalid $ toException $ InvalidState "unexpected-frame")

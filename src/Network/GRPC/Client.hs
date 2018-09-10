@@ -61,7 +61,7 @@ module Network.GRPC.Client (
   , CompressMode(..)
   , StreamDone(..)
   , BiDiStep(..)
-  , RunBiDiStep(..)
+  , RunBiDiStep
   , HandleMessageStep
   , HandleTrailersStep
   , IncomingEvent(..)
@@ -90,7 +90,6 @@ import Data.ByteString.Char8 (ByteString)
 import Data.CaseInsensitive (CI)
 import qualified Data.CaseInsensitive as CI
 import Data.Monoid ((<>))
-import Data.ProtoLens.Message (Message)
 import Data.ProtoLens.Service.Types (Service(..), HasMethod, HasMethodImpl(..), StreamingType(..))
 import GHC.TypeLits (Symbol)
 
@@ -98,7 +97,7 @@ import Network.GRPC.HTTP2.Types
 import Network.GRPC.HTTP2.Encoding
 import Network.HTTP2
 import Network.HPACK
-import Network.HTTP2.Client
+import Network.HTTP2.Client hiding (next)
 import Network.HTTP2.Client.Helpers
 
 type CIHeaderList = [(CI ByteString, ByteString)]
@@ -499,5 +498,3 @@ generalHandler rpc v0 handle w0 next = RPCCall $ \conn stream isfc osfc encoding
                     handle v1 (Invalid $ toException UnallowedPushPromiseReceived)
                 (StreamErrorEvent _ _) ->
                     handle v1 (Invalid $ toException $ InvalidState "stream error")
-                _ ->
-                    handle v1 (Invalid $ toException $ InvalidState "unexpected-frame")

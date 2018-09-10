@@ -69,8 +69,8 @@ be monitored in a uniform way.
 
 This library is currently an early-stage library. Expect breaking changes.
 
-## TODOs
+## Next steps
 
 - pass timeout as argument
-- support effectful compression (Zlib pure compression is supported)
 - provide function to map raw results into commonly-understood GRPC errors
+- (nice-to-have) support effectful compression (Zlib pure compression is supported)

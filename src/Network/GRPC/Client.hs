@@ -48,6 +48,8 @@
 module Network.GRPC.Client (
   -- * Building blocks.
     RPC(..)
+  , RPCCall(..)
+  , CIHeaderList
   , Authority
   , Timeout(..)
   , open

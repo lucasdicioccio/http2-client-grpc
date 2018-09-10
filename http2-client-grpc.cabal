@@ -1,7 +1,7 @@
 name:                http2-client-grpc
 version:             0.5.0.2
 synopsis:            Implement gRPC-over-HTTP2 clients.
-description:         Uses http2-client and proto-lens to generate client code.
+description:         A gRPC over http2-client using proto-lens to generate client code.
 homepage:            https://github.com/lucasdicioccio/http2-client-grpc#readme
 license:             BSD3
 license-file:        LICENSE

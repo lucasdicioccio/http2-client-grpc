@@ -29,7 +29,7 @@ import Network.HPACK (HeaderList)
 
 import Network.HTTP2.Client (newHttp2FrameConnection, newHttp2Client, Http2Client(..), IncomingFlowControl(..), GoAwayHandler, FallBackFrameHandler, ignoreFallbackHandler, HostName, PortNumber, TooMuchConcurrency)
 import Network.HTTP2.Client.Helpers (ping)
-import Network.GRPC.Client (RPC, open, singleRequest, streamReply, streamRequest, Authority, Timeout(..), StreamDone, CompressMode, RawReply)
+import Network.GRPC.Client (RPC, open, singleRequest, streamReply, streamRequest, steppedBiDiStream, generalHandler, Authority, Timeout(..), StreamDone, CompressMode, RawReply, RunBiDiStep, IncomingEvent(..), OutgoingEvent(..))
 import Network.GRPC.HTTP2.Encoding (Compression, Encoding(..), Decoding(..), gzip)
 
 -- | A simplified gRPC Client connected via an HTTP2Client to a given server.
@@ -157,7 +157,7 @@ unaryOutput
 unaryOutput = _Right . _Right . _3 . _Right
 
 -- | Calls for a server stream of requests.
-rawStreamServer 
+rawStreamServer
   :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'ServerStreaming)
   => RPC s m
   -- ^ The RPC to call.
@@ -192,4 +192,47 @@ rawStreamClient
   -> IO (Either TooMuchConcurrency (a, (RawReply (MethodOutput s m))))
 rawStreamClient rpc (GrpcClient client authority headers timeout compression _) v0 getNext =
     let call = streamRequest rpc v0 getNext
+    in open client authority headers timeout (Encoding compression) (Decoding compression) call
+
+-- | Starts a bidirectional ping-pong like stream with the server.
+--
+-- This handler is well-suited when the gRPC application has a deterministic
+-- protocols, that is, when after sending a message a client can know how many
+-- messages to wait for before sending the next message.
+rawSteppedBidirectional
+  :: (Service s, HasMethod s m, MethodStreamingType s m ~ 'BiDiStreaming)
+  => RPC s m
+  -- ^ The RPC to call.
+  -> GrpcClient
+  -- ^ An initialized client.
+  -> a
+  -- ^ An initial state.
+  -> RunBiDiStep s m a
+  -- ^ The sequential program to iterate between sending and receiving messages.
+  -> IO (Either TooMuchConcurrency a)
+rawSteppedBidirectional rpc (GrpcClient client authority headers timeout compression _) v0 handler =
+    let call = steppedBiDiStream rpc v0 handler
+    in open client authority headers timeout (Encoding compression) (Decoding compression) call
+
+-- | Starts a stream with the server.
+--
+-- This handler allows to concurrently write messages and wait for incoming
+-- messages.
+rawGeneralStream
+  :: (Service s, HasMethod s m)
+  => RPC s m
+  -- ^ The RPC to call.
+  -> GrpcClient
+  -- ^ An initialized client.
+  -> a
+  -- ^ An initial state for the incoming loop.
+  -> (a -> IncomingEvent s m a -> IO a)
+  -- ^ A state-passing function for the incoming loop.
+  -> b
+  -- ^ An initial state for the outgoing loop.
+  -> (b -> IO (b, OutgoingEvent s m b))
+  -- ^ A state-passing function for the ougoing loop.
+  -> IO (Either TooMuchConcurrency (a,b))
+rawGeneralStream rpc (GrpcClient client authority headers timeout compression _) v0 handler w0 next =
+    let call = generalHandler rpc v0 handler w0 next
     in open client authority headers timeout (Encoding compression) (Decoding compression) call

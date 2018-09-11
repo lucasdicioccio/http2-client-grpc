@@ -71,6 +71,5 @@ This library is currently an early-stage library. Expect breaking changes.
 
 ## Next steps
 
-- pass timeout as argument
 - provide function to map raw results into commonly-understood GRPC errors
 - (nice-to-have) support effectful compression (Zlib pure compression is supported)

@@ -27,8 +27,7 @@ library
                      , http2 >= 1.6 && < 1.7
                      , http2-client >= 0.8 && < 0.9
                      , http2-grpc-types >= 0.3 && < 0.4
-                     , proto-lens >= 0.3 && < 0.4
-                     , proto-lens-protoc >= 0.3 && < 0.4
+                     , proto-lens >= 0.4 && < 0.5
                      , text >= 1.2 && < 1.3
                      , tls >= 1.4 && < 1.5
   default-language:    Haskell2010

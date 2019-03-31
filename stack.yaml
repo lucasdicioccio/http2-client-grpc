@@ -1,1 +1,8 @@
-stack-lts-12.6.yaml
+resolver: lts-13.14
+packages:
+- .
+extra-deps:
+- http2-client-0.8.0.2
+- http2-grpc-types-0.3.0.0
+flags: {}
+extra-package-dbs: []

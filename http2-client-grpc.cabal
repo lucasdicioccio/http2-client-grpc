@@ -1,5 +1,5 @@
 name:                http2-client-grpc
-version:             0.5.0.5
+version:             0.6.0.0
 synopsis:            Implement gRPC-over-HTTP2 clients.
 description:         A gRPC over http2-client using proto-lens to generate client code.
 homepage:            https://github.com/lucasdicioccio/http2-client-grpc#readme
@@ -26,8 +26,8 @@ library
                      , lens >= 4.16 && < 4.18
                      , http2 >= 1.6 && < 1.7
                      , http2-client >= 0.8 && < 0.9
-                     , http2-grpc-types >= 0.3 && < 0.4
-                     , proto-lens >= 0.4 && < 0.5
+                     , http2-grpc-types >= 0.4 && < 0.5
+                     , proto-lens >= 0.5 && < 0.6
                      , text >= 1.2 && < 1.3
                      , tls >= 1.4 && < 1.5
   default-language:    Haskell2010

@@ -15,10 +15,11 @@
 module Network.GRPC.Client.Helpers where
 
 import Control.Lens
-import Control.Concurrent.Async (Async, async, cancel)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async.Lifted (Async, async, cancel)
+import Control.Concurrent.Lifted (threadDelay)
 import Control.Exception (throwIO)
 import Control.Monad (forever)
+import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.ByteString.Char8 (ByteString)
 import Data.Default.Class (def)
@@ -27,7 +28,7 @@ import qualified Network.TLS as TLS
 import qualified Network.TLS.Extra.Cipher as TLS
 import Network.HPACK (HeaderList)
 
-import Network.HTTP2.Client (newHttp2FrameConnection, newHttp2Client, Http2Client(..), IncomingFlowControl(..), GoAwayHandler, FallBackFrameHandler, ignoreFallbackHandler, HostName, PortNumber, TooMuchConcurrency)
+import Network.HTTP2.Client (ClientIO, ClientError, newHttp2FrameConnection, newHttp2Client, Http2Client(..), IncomingFlowControl(..), GoAwayHandler, FallBackFrameHandler, ignoreFallbackHandler, HostName, PortNumber, TooMuchConcurrency)
 import Network.HTTP2.Client.Helpers (ping)
 import Network.GRPC.Client (RPC, open, singleRequest, streamReply, streamRequest, steppedBiDiStream, generalHandler, Authority, Timeout(..), StreamDone, CompressMode, RawReply, RunBiDiStep, IncomingEvent(..), OutgoingEvent(..))
 import Network.GRPC.HTTP2.Encoding (Compression, Encoding(..), Decoding(..), gzip)
@@ -50,9 +51,9 @@ data GrpcClient = GrpcClient {
   }
 
 data BackgroundTasks = BackgroundTasks {
-    backgroundWindowUpdate :: Async ()
+    backgroundWindowUpdate :: Async (Either ClientError ())
   -- ^ Periodically give the server credit to use the connection.
-  , backgroundPing         :: Async ()
+  , backgroundPing         :: Async (Either ClientError ())
   -- ^ Periodically ping the server.
   }
 
@@ -82,7 +83,7 @@ data GrpcClientConfig = GrpcClientConfig {
 
 grpcClientConfigSimple :: HostName -> PortNumber -> UseTlsOrNot -> GrpcClientConfig
 grpcClientConfigSimple host port tls =
-    GrpcClientConfig host port [] (Timeout 3000) gzip (tlsSettings tls host port) throwIO ignoreFallbackHandler 5000000 1000000
+    GrpcClientConfig host port [] (Timeout 3000) gzip (tlsSettings tls host port) (liftIO . throwIO) ignoreFallbackHandler 5000000 1000000
 
 type UseTlsOrNot = Bool
 
@@ -101,7 +102,7 @@ tlsSettings True host port = Just $ TLS.ClientParams {
         }
 
 
-setupGrpcClient :: GrpcClientConfig -> IO GrpcClient
+setupGrpcClient :: GrpcClientConfig -> ClientIO GrpcClient
 setupGrpcClient config = do
   let host = _grpcClientConfigHost config
   let port = _grpcClientConfigPort config
@@ -125,7 +126,7 @@ setupGrpcClient config = do
   return $ GrpcClient cli authority headers timeout compression tasks
 
 -- | Cancels background tasks and closes the underlying HTTP2 client.
-close :: GrpcClient -> IO ()
+close :: GrpcClient -> ClientIO ()
 close grpc = do
     cancel $ backgroundPing $ _grpcClientBackground grpc
     cancel $ backgroundWindowUpdate $ _grpcClientBackground grpc
@@ -140,7 +141,7 @@ rawUnary
   -- ^ An initialized client.
   -> MethodInput s m
   -- ^ The input.
-  -> IO (Either TooMuchConcurrency (RawReply (MethodOutput s m)))
+  -> ClientIO (Either TooMuchConcurrency (RawReply (MethodOutput s m)))
 rawUnary rpc (GrpcClient client authority headers timeout compression _) input =
     let call = singleRequest rpc input
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
@@ -167,10 +168,10 @@ rawStreamServer
   -- ^ An initial state.
   -> MethodInput s m
   -- ^ The input of the stream request.
-  -> (a -> HeaderList -> MethodOutput s m -> IO a)
+  -> (a -> HeaderList -> MethodOutput s m -> ClientIO a)
   -- ^ A state-passing handler called for each server-sent output.
   -- Headers are repeated for convenience but are the same for every iteration.
-  -> IO (Either TooMuchConcurrency (a, HeaderList, HeaderList))
+  -> ClientIO (Either TooMuchConcurrency (a, HeaderList, HeaderList))
 rawStreamServer rpc (GrpcClient client authority headers timeout compression _) v0 input handler =
     let call = streamReply rpc v0 input handler
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
@@ -187,9 +188,9 @@ rawStreamClient
   -- ^ An initialized client.
   -> a
   -- ^ An initial state.
-  -> (a -> IO (a, Either StreamDone (CompressMode, MethodInput s m)))
+  -> (a -> ClientIO (a, Either StreamDone (CompressMode, MethodInput s m)))
   -- ^ A state-passing step function to decide the next message.
-  -> IO (Either TooMuchConcurrency (a, (RawReply (MethodOutput s m))))
+  -> ClientIO (Either TooMuchConcurrency (a, (RawReply (MethodOutput s m))))
 rawStreamClient rpc (GrpcClient client authority headers timeout compression _) v0 getNext =
     let call = streamRequest rpc v0 getNext
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
@@ -209,7 +210,7 @@ rawSteppedBidirectional
   -- ^ An initial state.
   -> RunBiDiStep s m a
   -- ^ The sequential program to iterate between sending and receiving messages.
-  -> IO (Either TooMuchConcurrency a)
+  -> ClientIO (Either TooMuchConcurrency a)
 rawSteppedBidirectional rpc (GrpcClient client authority headers timeout compression _) v0 handler =
     let call = steppedBiDiStream rpc v0 handler
     in open client authority headers timeout (Encoding compression) (Decoding compression) call
@@ -226,13 +227,13 @@ rawGeneralStream
   -- ^ An initialized client.
   -> a
   -- ^ An initial state for the incoming loop.
-  -> (a -> IncomingEvent s m a -> IO a)
+  -> (a -> IncomingEvent s m a -> ClientIO a)
   -- ^ A state-passing function for the incoming loop.
   -> b
   -- ^ An initial state for the outgoing loop.
-  -> (b -> IO (b, OutgoingEvent s m b))
+  -> (b -> ClientIO (b, OutgoingEvent s m b))
   -- ^ A state-passing function for the ougoing loop.
-  -> IO (Either TooMuchConcurrency (a,b))
+  -> ClientIO (Either TooMuchConcurrency (a,b))
 rawGeneralStream rpc (GrpcClient client authority headers timeout compression _) v0 handler w0 next =
     let call = generalHandler rpc v0 handler w0 next
     in open client authority headers timeout (Encoding compression) (Decoding compression) call

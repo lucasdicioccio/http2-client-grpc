@@ -1,3 +1,2 @@
-import Data.ProtoLens.Setup
-
-main = defaultMain "."
+import Distribution.Simple
+main = defaultMain

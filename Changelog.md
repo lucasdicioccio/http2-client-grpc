@@ -2,7 +2,9 @@
 
 ## Unreleased changes
 
-## 0.6.0.0
+- Support GHC 8.8
+
+## 0.7.0.0
 
 Update to http2-client-0.9.0.0
 

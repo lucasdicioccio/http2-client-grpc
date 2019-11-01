@@ -1,0 +1,8 @@
+resolver: nightly-2019-11-01
+packages:
+- '.'
+extra-deps:
+- http2-client-0.9.1.0
+- http2-grpc-types-0.4.1.0
+flags: {}
+extra-package-dbs: []

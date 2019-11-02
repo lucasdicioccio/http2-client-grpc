@@ -1,3 +1,10 @@
+# THIS REPO IS MOVING
+
+NOTE: we'll be moving the code in this repository to https://github.com/haskell-grpc-native .
+
+
+
+
 # http2-client-grpc
 
 A native HTTP2 gRPC client library using `proto-lens` and `http2-client`.
